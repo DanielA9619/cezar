@@ -17,6 +17,8 @@ This uses no new npm dependency and adds no hosted service or recurring cost. Th
 
 The Windows executor launched Bash directly and called `taskkill /PID <wrapper-pid> /T /F` on stop. A successful taskkill invocation was not sufficient evidence that the process tree had exited. The prior baseline audit recorded a one-second timeout returning `quiescent: false` while a `sleep.exe` descendant remained alive after the supervisor exited. A later local probe in this session also reproduced an interrupted timeout result with `quiescent: false`. Its PID came from Git Bash's POSIX namespace, so it was not used to signal or identify a Windows process.
 
+That initial probe left `%TEMP%\cezar-owned-timeout-gCQPwR` busy after its supervisor exited. `Win32_Process` inspection returned access denied, and the marker contained only a Git Bash PID, so the directory was retained instead of terminating a possibly unrelated Windows PID. The new integration tests use unique executable names and positively verify their process names before reporting cleanup.
+
 Windows Job Objects provide the needed ownership boundary. Microsoft documents that child processes join a job by default, that a suspended process can be assigned before it begins running, and that closing the last handle on a job configured with `KILL_ON_JOB_CLOSE` terminates its members. The helper sets no breakaway flags. See [Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects) and [AssignProcessToJobObject](https://learn.microsoft.com/en-us/windows/win32/api/jobapi2/nf-jobapi2-assignprocesstojobobject).
 
 ## Process state and worktree safety
