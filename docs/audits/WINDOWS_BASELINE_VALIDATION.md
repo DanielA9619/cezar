@@ -4,6 +4,8 @@
 **Branch:** `baseline/windows-cli-discovery` at `72c0f8a4` before this session's commit  
 **Recommendation:** **NO-GO** for the disposable autonomous-repository test.
 
+The shim fix and validation findings were committed as `3c69472c` and pushed to `origin/baseline/windows-cli-discovery`. This final report note is included in a follow-on documentation commit on the same branch.
+
 This session ran on Windows 10 Pro 22H2, build **19045.6466** (confirmed from the Windows version registry and `cmd /c ver`). It is not the Windows 11 host described for the next milestone, so it cannot certify that machine. Git initially rejected the checkout as unsafe because of the owner mismatch. Repository inspection used a command-scoped `safe.directory` override; no Git ownership or global safety setting changed.
 
 ### Current environment
