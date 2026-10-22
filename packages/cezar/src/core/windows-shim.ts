@@ -10,7 +10,7 @@
  * a `.js` override gets the same treatment.
  */
 import { closeSync, existsSync, openSync, readSync } from 'node:fs';
-import { dirname, extname, isAbsolute, join, resolve } from 'node:path';
+import { delimiter, dirname, extname, isAbsolute, join, resolve } from 'node:path';
 
 const SHIM_EXTENSIONS = new Set(['.cmd', '.bat', '.ps1']);
 const SCRIPT_EXTENSIONS = new Set(['.js', '.cjs', '.mjs']);
@@ -26,6 +26,8 @@ export interface ShimOptions {
   platform?: NodeJS.Platform;
   /** The node to run a script with when the shim has none beside it; defaults to this process's. */
   nodePath?: string;
+  /** PATH to search for a bare command; defaults to this process's PATH. */
+  searchPath?: string;
 }
 
 /** What a shim launches: a node script, or a native binary it calls directly (opencode). */
@@ -91,6 +93,24 @@ export function shimScript(shimPath: string): string | null {
   return target?.kind === 'node' ? target.path : null;
 }
 
+/** Resolve a bare Windows command without a shell, accepting only native binaries or shims
+ * whose target {@link shimTarget} can launch directly. npm installs agent CLIs as `.cmd` files;
+ * Node cannot spawn those by their bare name, but {@link spawnableCommand} can safely translate
+ * the parsed shim into `node <script>` (or the native target) without invoking cmd.exe. */
+function resolveBareWindowsCommand(program: string, searchPath: string): string | null {
+  if (!program || program.includes('/') || program.includes('\\') || extname(program)) return null;
+  for (const dir of searchPath.split(delimiter)) {
+    if (!dir) continue;
+    for (const extension of ['.com', '.exe', '.cmd', '.bat', '.ps1']) {
+      const candidate = join(dir, `${program}${extension}`);
+      if (!existsSync(candidate)) continue;
+      if (extension === '.com' || extension === '.exe') return candidate;
+      if (shimTarget(candidate)) return candidate;
+    }
+  }
+  return null;
+}
+
 /**
  * `[file, args]` that run `program` without a shell. Untouched off Windows and for anything that
  * is not a recognisable shim or script, so a bad path still fails the spawn with its own error.
@@ -101,13 +121,14 @@ export function spawnableCommand(
   opts: ShimOptions = {},
 ): [string, string[]] {
   if ((opts.platform ?? process.platform) !== 'win32') return [program, [...args]];
-  const ext = extname(program).toLowerCase();
+  const resolved = resolveBareWindowsCommand(program, opts.searchPath ?? process.env.PATH ?? '') ?? program;
+  const ext = extname(resolved).toLowerCase();
   const nodePath = opts.nodePath ?? process.execPath;
-  if (SCRIPT_EXTENSIONS.has(ext) && existsSync(program)) return [nodePath, [program, ...args]];
-  if (!SHIM_EXTENSIONS.has(ext)) return [program, [...args]];
-  const shimPath = isAbsolute(program) ? program : resolve(program);
+  if (SCRIPT_EXTENSIONS.has(ext) && existsSync(resolved)) return [nodePath, [resolved, ...args]];
+  if (!SHIM_EXTENSIONS.has(ext)) return [resolved, [...args]];
+  const shimPath = isAbsolute(resolved) ? resolved : resolve(resolved);
   const target = shimTarget(shimPath);
-  if (!target) return [program, [...args]];
+  if (!target) return [resolved, [...args]];
   if (target.kind === 'native') return [target.path, [...args]];
   // The shim prefers a node.exe shipped beside it; mirror that.
   const bundledNode = join(dirname(shimPath), 'node.exe');

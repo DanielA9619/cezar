@@ -73,6 +73,16 @@ describe('spawnableCommand (telemetry a330744e)', () => {
     expect(shimScript(join(bin, 'codex.cmd'))).toBe(script);
   });
 
+  it('resolves a bare npm command from PATH and runs the parsed target without a shell', () => {
+    const { shim, script } = npmInstall();
+    expect(spawnableCommand('codex', ['app-server'], {
+      platform: 'win32',
+      nodePath: 'NODE',
+      searchPath: dir,
+    })).toEqual(['NODE', [script, 'app-server']]);
+    expect(shim).toBe(join(dir, 'codex.cmd'));
+  });
+
   // Telemetry 3626ac13: CEZ_OPENCODE_BIN pointed at npm's opencode.ps1, which Node cannot spawn.
   it('reads the .ps1 twin npm writes beside the .cmd', () => {
     const { script } = npmInstall();
@@ -119,7 +129,7 @@ describe('spawnableCommand (telemetry a330744e)', () => {
     writeFileSync(join(dir, 'gone.cmd'), NPM_SHIM);
     expect(spawnableCommand(join(dir, 'gone.cmd'), [], { platform: 'win32' })).toEqual([join(dir, 'gone.cmd'), []]);
     expect(spawnableCommand(join(dir, 'missing.cmd'), [], { platform: 'win32' })).toEqual([join(dir, 'missing.cmd'), []]);
-    expect(spawnableCommand('codex', ['a'], { platform: 'win32' })).toEqual(['codex', ['a']]);
+    expect(spawnableCommand('codex', ['a'], { platform: 'win32', searchPath: '' })).toEqual(['codex', ['a']]);
   });
 
   it('changes nothing off Windows', () => {
