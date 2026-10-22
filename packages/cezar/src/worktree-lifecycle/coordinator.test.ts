@@ -139,6 +139,22 @@ describe('worktree lifecycle coordinator with real Git and command fixtures', ()
     expect((await p.coordinator.store.readOperation(setup!.id))?.state).toBe('interrupted');
   });
 
+  it('blocks retry and retains the worktree when a script process identity is uncertain', async () => {
+    const p = await project(); await p.config([entry('true')]);
+    const prepared = await p.prepare();
+    const operation = await p.coordinator.store.readOperation(prepared.operationId!);
+    operation!.state = 'interrupted';
+    const execution = operation!.executions.at(-1)!;
+    execution.state = 'interrupted';
+    execution.process = {pid: 123, hostname: 'unverifiable-host', startedAt: new Date().toISOString(), quiescent: false};
+    operation!.revision++;
+    await p.coordinator.store.writeOperation(operation!, operation!.revision - 1);
+    const view = await p.coordinator.operation(operation!.id);
+    expect(view.allowedActions).not.toContain('retry');
+    await expect(p.coordinator.action(operation!.id, {requestId: randomUUID(), expectedRevision: view.revision, action: 'retry'})).rejects.toThrow('not available');
+    expect(existsSync(prepared.path)).toBe(true);
+  });
+
   it('keeps a crashed variant cancellation blocked when the prior agent exit cannot be verified', async () => {
     const p = await project(); await p.config([entry('true')], [entry('touch should-not-run')]);
     const prepared = await p.prepare();
@@ -211,7 +227,7 @@ describe('worktree lifecycle coordinator with real Git and command fixtures', ()
     expect((await p.prepare()).ready).toBe(true);
     expect(await readFile(join(prepared.path, 'trace'), 'utf8')).toBe('first\nfailing\nthird\ninserted\nrepaired\n');
     expect((await p.coordinator.operation(initial.id)).history.filter(item => item.entryId === first.id)).toHaveLength(1);
-  });
+  }, process.platform === 'win32' ? 20_000 : undefined);
 
   it('reruns an edited successful entry and omits removed entries on current-list retry', async () => {
     const p = await project();

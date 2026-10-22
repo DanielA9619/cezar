@@ -19,6 +19,7 @@
     "dist",
     "web/dist",
     "scripts",
+    "src/worktree-lifecycle/windows-process-supervisor.ps1",
     "README.md"
   ],
   "engines": {
