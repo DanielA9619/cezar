@@ -347,6 +347,7 @@ export class WorktreeLifecycleCoordinator {
         record.preparedBy = operation.decision?.action === 'start-anyway' ? 'bypassed' : 'completed';
       } else {
         if (this.options.isActive(record.runId)) throw new LifecycleConflict('Task is still active; directory retained');
+        this.assertAgentCleanup(record.runId);
         this.context(record);
         {
           await removeWorktree(this.root, record.worktreePath, operation.intent === 'reclaim' ? undefined : record.branch);
@@ -402,10 +403,16 @@ export class WorktreeLifecycleCoordinator {
     };
   }
   async withWorktreeMutation<T>(runId: string, mutate: () => Promise<T>): Promise<T> {
+    if (this.runs.getRun(runId)?.agentCleanup === 'uncertain') this.assertAgentCleanup(runId);
     // This process's held agent lease already excludes teardown; its own git actions (commit,
     // push, publish) run beside the agent exactly as they did before scripts existed.
     if (this.agentLeases.get(runId)?.held) return mutate();
+    this.assertAgentCleanup(runId);
     return this.lockedMutation(runId, mutate);
+  }
+  private assertAgentCleanup(runId: string): void {
+    const cleanup = this.runs.getRun(runId)?.agentCleanup;
+    if (cleanup === 'pending' || cleanup === 'uncertain') throw new LifecycleConflict('Agent process-tree cleanup is unconfirmed; worktree retained for manual recovery');
   }
   private async lockedMutation<T>(runId: string, mutate: () => Promise<T>): Promise<T> {
     if (!await this.requiresGate(runId)) return mutate();
@@ -452,6 +459,7 @@ export class WorktreeLifecycleCoordinator {
         if (existing && !terminal.has(existing.state)) throw new LifecycleConflict('Worktree already has a pending lifecycle operation');
       }
       if (this.options.isActive(record.runId)) throw new LifecycleConflict('Task is active; cancel it before removing its worktree');
+      this.assertAgentCleanup(record.runId);
       const operation = this.makeOperation(record, intent);
       operation.requests.push({requestId, bodyHash: hash}); record.activeOperationId = operation.id;
       await this.store.writeOperation(operation); await this.store.writeWorktree(record); this.changed(record, operation);

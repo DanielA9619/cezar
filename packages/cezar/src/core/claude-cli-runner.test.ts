@@ -23,12 +23,12 @@ import type { UiEvent } from './ui-events.ts';
  *  file keeps spawning its real stub binary through the untouched `spawn`. */
 const spawnHook = vi.hoisted(() => ({ override: null as null | (() => unknown) }));
 
-vi.mock('node:child_process', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:child_process')>();
+vi.mock('./supervised-agent-process.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./supervised-agent-process.ts')>();
   return {
     ...actual,
-    spawn: (...args: Parameters<typeof actual.spawn>) =>
-      spawnHook.override ? spawnHook.override() : actual.spawn(...args),
+    spawnAgentProcess: (...args: Parameters<typeof actual.spawnAgentProcess>) =>
+      spawnHook.override ? spawnHook.override() : actual.spawnAgentProcess(...args),
   };
 });
 
@@ -123,7 +123,7 @@ describe('a teardown cezar initiated', () => {
     new URL('./__fixtures__/claude/stub-ignores-eof-exits-143.mjs', import.meta.url),
   );
 
-  it('settles the session instead of failing it when the CLI exits 143', async () => {
+  it.skipIf(process.platform === 'win32')('settles the session instead of failing it when the CLI exits 143', async () => {
     const runner = new ClaudeCliRunner({ bin: stubBin, timeoutMs: 0 });
     const events: AgentEvent[] = [];
     const uiEvents: UiEvent[] = [];

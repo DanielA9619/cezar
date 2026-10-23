@@ -15,12 +15,12 @@ import { RunStore } from '../runs/store.ts';
  *  file keeps spawning the real mock app-server through the untouched `spawn`. */
 const spawnHook = vi.hoisted(() => ({ override: null as null | (() => unknown) }));
 
-vi.mock('node:child_process', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:child_process')>();
+vi.mock('./supervised-agent-process.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./supervised-agent-process.ts')>();
   return {
     ...actual,
-    spawn: (...args: Parameters<typeof actual.spawn>) =>
-      spawnHook.override ? spawnHook.override() : actual.spawn(...args),
+    spawnAgentProcess: (...args: Parameters<typeof actual.spawnAgentProcess>) =>
+      spawnHook.override ? spawnHook.override() : actual.spawnAgentProcess(...args),
   };
 });
 
@@ -35,7 +35,7 @@ describe('a teardown cezar initiated (codex app-server)', () => {
     new URL('./__fixtures__/codex/mock-codex-app-server.mjs', import.meta.url),
   );
 
-  it('settles the session instead of failing it when the app-server exits 143', async () => {
+  it.skipIf(process.platform === 'win32')('settles the session instead of failing it when the app-server exits 143', async () => {
     const runner = new CodexAppServerRunner({ bin: mockBin, timeoutMs: 0 });
     const events: AgentEvent[] = [];
     let sawText: () => void = () => {};
@@ -135,7 +135,7 @@ describe('late Codex teardown events (#1105)', () => {
     new URL('./__fixtures__/codex/mock-codex-app-server.mjs', import.meta.url),
   );
 
-  it('does not route a teardown follow-up failure into a removed run store', async () => {
+  it.skipIf(process.platform === 'win32')('does not route a teardown follow-up failure into a removed run store', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'cez-1105-'));
     const store = RunStore.open(join(dir, '.ai/cezar'));
     const run = store.createRun({

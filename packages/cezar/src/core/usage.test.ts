@@ -3,6 +3,11 @@ import { describe, expect, it } from 'vitest';
 import { CACHE_CREATION_WEIGHT, CACHE_READ_WEIGHT, costWeightedTokens, type RawUsage } from './usage.ts';
 
 describe('costWeightedTokens', () => {
+  it('reconciles the Milestone 0E real Claude trial without aggregating assistant frames twice', () => {
+    const usage = { input_tokens: 14, output_tokens: 2709, cache_read_input_tokens: 189214, cache_creation_input_tokens: 34483 };
+    expect(Object.values(usage).reduce((sum, value) => sum + value, 0)).toBe(226420);
+    expect(costWeightedTokens(usage)).toBe(64748);
+  });
   describe('absent or empty usage', () => {
     it.each([
       { name: 'undefined', usage: undefined },

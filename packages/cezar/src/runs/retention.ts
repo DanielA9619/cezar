@@ -24,7 +24,7 @@ function recencyKey(run: RunRecord): string {
 /** A run is reclaimable when it is finished, still has a materialized worktree
  *  directory, and has not already been reclaimed. */
 export function isReclaimable(run: RunRecord): boolean {
-  return FINISHED.has(run.status) && !!run.worktreePath && !run.worktreeReclaimedAt;
+  return FINISHED.has(run.status) && !!run.worktreePath && !run.worktreeReclaimedAt && run.agentCleanup !== 'pending' && run.agentCleanup !== 'uncertain';
 }
 
 /**

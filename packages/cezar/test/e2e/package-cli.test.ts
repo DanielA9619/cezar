@@ -6,10 +6,13 @@ import { dirname, join, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { spawnableCommand } from '../../src/core/windows-shim.ts';
 
 const execFile = promisify(execFileCallback);
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
-const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+const [npm, npmPrefix] = process.env.npm_execpath
+  ? [process.execPath, [process.env.npm_execpath]]
+  : spawnableCommand('npm', []);
 
 test('the release tarball installs and runs the dry-run CLI workflow', { timeout: 120_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'cezar-package-e2e-'));
@@ -19,7 +22,7 @@ test('the release tarball installs and runs the dry-run CLI workflow', { timeout
     await mkdir(packDir);
     const packed = await execFile(
       npm,
-      ['pack', '--json', '--ignore-scripts', '--pack-destination', packDir],
+      [...npmPrefix, 'pack', '--json', '--ignore-scripts', '--pack-destination', packDir],
       { cwd: repoRoot, maxBuffer: 10 * 1024 * 1024 },
     );
     const records = JSON.parse(packed.stdout) as Array<{
@@ -30,7 +33,7 @@ test('the release tarball installs and runs the dry-run CLI workflow', { timeout
     assert.ok(record, 'npm pack should describe the generated tarball');
 
     const packagedPaths = new Set(record.files.map((file) => file.path));
-    for (const requiredPath of ['dist/index.js', 'web/dist/index.html', 'scripts/mock-claude.mjs', 'README.md']) {
+    for (const requiredPath of ['dist/index.js', 'dist/core/supervised-agent-process.js', 'src/worktree-lifecycle/windows-process-supervisor.ps1', 'web/dist/index.html', 'scripts/mock-claude.mjs', 'README.md']) {
       assert.ok(packagedPaths.has(requiredPath), `release tarball should contain ${requiredPath}`);
     }
     assert.equal(packagedPaths.has('src/index.ts'), false, 'release tarball should not contain TypeScript sources');
@@ -42,7 +45,7 @@ test('the release tarball installs and runs the dry-run CLI workflow', { timeout
     const tarball = join(packDir, record.filename);
     await execFile(
       npm,
-      ['install', '--ignore-scripts', '--no-audit', '--no-fund', '--no-package-lock', tarball],
+      [...npmPrefix, 'install', '--ignore-scripts', '--no-audit', '--no-fund', '--no-package-lock', tarball],
       { cwd: consumerDir, maxBuffer: 10 * 1024 * 1024 },
     );
 
@@ -88,9 +91,11 @@ test('the release tarball installs and runs the dry-run CLI workflow', { timeout
 
     const runs = JSON.parse(await readFile(join(fixtureRepo, '.ai', 'cezar', 'runs.json'), 'utf8')) as Array<{
       status: string;
+      agentCleanup?: string;
     }>;
     assert.equal(runs.length, 1);
     assert.ok(['done', 'review'].includes(runs[0]?.status ?? ''), 'the dry-run workflow should finish successfully');
+    if (process.platform === 'win32') assert.equal(runs[0]?.agentCleanup, 'confirmed', 'installed CLI must confirm Windows process-tree cleanup');
 
     // Boot wiring (spec 2026-07-20-multi-project-workspace, step 1.5): the
     // headless run migrated ~/.cezar and registered the boot repo.
@@ -242,6 +247,6 @@ if (args.join(' ') === 'auth status --json') {
       'unknown platform should exit 1',
     );
   } finally {
-    await rm(root, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });

@@ -188,6 +188,8 @@ export interface AgentRunResult {
 }
 
 export interface SessionOptions {
+  /** Durable ownership checkpoint before a Windows supervised process can start. */
+  beforeProcessStart?: () => void;
   /** Close the session shortly after the first turn ends (single-turn
    *  behavior, used for non-interactive workflow steps). Interactive
    *  sessions omit this and control `end()` themselves. */
@@ -205,6 +207,8 @@ export interface SessionOptions {
  * (claude stdin, codex app-server, opencode serve).
  */
 export interface AgentSession {
+  /** Windows Job Object proof; false includes a missing supervisor completion marker. */
+  readonly processQuiescent?: boolean;
   /** Resolves when the backend process exits — the session is fully over. */
   result: Promise<AgentRunResult>;
   /** OS pid of the spawned backend process — the root of the run's process

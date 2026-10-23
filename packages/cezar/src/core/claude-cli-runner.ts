@@ -1,4 +1,5 @@
-import { spawn as nodeSpawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { spawnAgentProcess, confirmAgentProcessExit, agentProcessQuiescent } from './supervised-agent-process.ts';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -127,7 +128,7 @@ export class ClaudeCliRunner implements AgentRunner {
     try {
       const env = buildChildEnv({ backend: this.backend, extraEnv: spec.env });
       const [file, argv] = disclaimedCommand(this.bin, args, env);
-      child = nodeSpawn(file, argv, { cwd: spec.cwd, env });
+      child = spawnAgentProcess(file, argv, { cwd: spec.cwd, env }, opts.beforeProcessStart);
     } catch (err) {
       mcpConfig?.cleanup();
       throw wrapSpawnError(err, this.bin);
@@ -316,9 +317,7 @@ export class ClaudeCliRunner implements AgentRunner {
         // error — expected; rethrow anything else.
         if (!timedOut) throw err;
       } finally {
-        if (deadline) clearTimeout(deadline);
-        if (killTimer) clearTimeout(killTimer);
-        if (hardKillTimer) clearTimeout(hardKillTimer);
+        if (!hasExited()) end();
         if (autoEndTimer) clearTimeout(autoEndTimer);
         stdinOpen = false;
         // stdout closed: the CLI read `--mcp-config` at startup long ago, so the file can go.
@@ -326,10 +325,14 @@ export class ClaudeCliRunner implements AgentRunner {
       }
 
       const exitCode = await waitForExit(child);
+      if (deadline) clearTimeout(deadline);
+      if (killTimer) clearTimeout(killTimer);
+      if (hardKillTimer) clearTimeout(hardKillTimer);
       if (eofTermTimer) clearTimeout(eofTermTimer);
       if (eofKillTimer) clearTimeout(eofKillTimer);
 
       if (spawnFailed) throw spawnFailed;
+      await confirmAgentProcessExit(child);
 
       const text = textChunks.join('\n').trim();
 
@@ -375,6 +378,7 @@ export class ClaudeCliRunner implements AgentRunner {
       interrupt,
       hardStop,
       pid: child.pid,
+      get processQuiescent() { return agentProcessQuiescent(child); },
       get open() {
         return stdinOpen;
       },

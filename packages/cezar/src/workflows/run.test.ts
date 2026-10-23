@@ -172,6 +172,23 @@ describe('RunManager directional usage accounting', () => {
     expect(store.getRun(run.id)).toMatchObject({ inputTokens: 15, outputTokens: 3 });
   });
 
+  it('persists raw and cache counts once, keeping provider-specific totals separate from weighted usage', () => {
+    const { run, state, sink } = fixture();
+    internal.beginUsageInvocation(run.id, state, 'work');
+    internal.handleRunnerUiEvent(run.id, state, sink, { type: 'turn.started', turnId: 'trial' });
+    const event: UiEvent = { type: 'turn.completed', turnId: 'trial', stopReason: 'end_turn', usage: { input: 14, output: 2709, cacheRead: 189214, cacheWrite: 34483, total: 226420 } };
+    internal.handleRunnerUiEvent(run.id, state, sink, event);
+    internal.handleRunnerUiEvent(run.id, state, sink, event);
+    store.updateStep(run.id, 'work', { tokensUsed: 64748 });
+    expect(RunStore.open(join(repoRoot, '.ai/cezar')).getRun(run.id)).toMatchObject({ rawTotalTokens: 226420, cacheReadTokens: 189214, cacheWriteTokens: 34483 });
+    expect(store.getRun(run.id)?.tokensUsed).toBe(64748);
+    internal.handleRunnerUiEvent(run.id, state, sink, { type: 'turn.started', turnId: 'no-cache-report' });
+    internal.handleRunnerUiEvent(run.id, state, sink, { type: 'turn.completed', turnId: 'no-cache-report', stopReason: 'end_turn', usage: { input: 1, output: 2, total: 3 } });
+    expect(store.getRun(run.id)?.rawTotalTokens).toBe(226423);
+    expect(store.getRun(run.id)?.cacheReadTokens).toBeUndefined();
+    expect(store.getRun(run.id)?.cacheWriteTokens).toBeUndefined();
+  });
+
   it('keeps the run aggregate absent after a pre-turn failure even when a later invocation is metered', () => {
     const { run, state, sink } = fixture();
     internal.beginUsageInvocation(run.id, state, 'work');

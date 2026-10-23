@@ -481,6 +481,14 @@ describe('action bar visibility per status (the legacy rules, rendered)', () => 
     expect(usage[0]!.querySelector('[data-slot="agent-badge"]')).not.toBeNull()
   })
 
+  it('distinguishes raw, cache-weighted and estimated dollar-equivalent usage', () => {
+    stubFetch()
+    renderHeader(run('done', { runner: 'claude', rawTotalTokens: 226_420, tokensUsed: 64_748, inputTokens: 14, outputTokens: 2709, cacheReadTokens: 189_214, cacheWriteTokens: 34_483, costUsd: 0.01 }))
+    expect(screen.getByText(/RAW 226,420 · WEIGHTED 64,748/)).toBeTruthy()
+    expect(screen.getByTitle(/cache read: 189,214; cache write: 34,483/)).toBeTruthy()
+    expect(screen.getByTitle(/not an actual subscription charge/).textContent).toContain('Est.')
+  })
+
   it('the git button sits top right; the other actions close the details row', async () => {
     stubFetch({
       '/api/v1/runs/r1/git/status': () => jsonResponse({ uncommitted: 0, unpushed: 1 }),

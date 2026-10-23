@@ -941,6 +941,14 @@ function RunUsage({
   className?: string
 }) {
   const usage: ReactNode[] = []
+  if (showTokens) {
+    const exact = (value: number | undefined) => value === undefined ? 'unknown' : value.toLocaleString()
+    usage.push(
+      <span key="breakdown" className="font-mono tabular-nums" title={`Raw total: ${exact(run.rawTotalTokens)}; input: ${exact(run.inputTokens)}; output: ${exact(run.outputTokens)}; cache read: ${exact(run.cacheReadTokens)}; cache write: ${exact(run.cacheWriteTokens)}. Raw totals follow each provider's accounting; Codex input includes cache reads. Legacy usage is cache-weighted for Claude and backend-specific otherwise, not a subscription quota.`}>
+        RAW {exact(run.rawTotalTokens)} · {run.runner === 'claude' || !run.runner ? 'WEIGHTED' : 'AGGREGATE'} {exact(run.tokensUsed)}
+      </span>,
+    )
+  }
   if (showTokens && (run.inputTokens !== undefined || run.outputTokens !== undefined)) {
     usage.push(
       <DirectionalUsage
@@ -950,10 +958,10 @@ function RunUsage({
       />,
     )
   }
-  if (showCost && run.costUsd) {
+  if (showCost && run.costUsd !== undefined) {
     usage.push(
-      <span key="cost" className="tabular-nums">
-        {formatCost(run.costUsd)}
+      <span key="cost" className="tabular-nums" title="Provider-reported estimated API dollar equivalent. This is not an actual subscription charge.">
+        Est. {formatCost(run.costUsd)}
       </span>,
     )
   }

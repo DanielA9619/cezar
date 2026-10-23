@@ -1,0 +1,19 @@
+name: reliable-npm-task
+description: Claude implementation followed by a Cezar-owned npm test gate (at most two corrections).
+steps:
+  - id: implement
+    prompt: >-
+      {{task}}
+      Implement the change. Cezar runs npm test in the following verification step.
+      Fix any failed verification output returned on a correction attempt.
+    runner: claude
+    allowedTools: [Read, Edit, Write, Grep, Glob]
+  - id: verify
+    command: npm test
+    timeoutSeconds: 600
+    onFail:
+      retry: implement
+      max: 2
+      retryOn: [1]
+# An independent Codex review can be inserted before a final verification step.
+# Codex does not honor allowedTools; choose its sandbox separately before enabling it.

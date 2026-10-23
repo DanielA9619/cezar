@@ -265,6 +265,7 @@ steps:
   - id: verify
     name: Verify
     command: "npm test"          # a check step: exit 0 passes
+    timeoutSeconds: 600          # optional; default 1800, range 1–86400
     onFail:
       retry: implement           # loop back to an earlier step…
       max: 2                     # …at most twice

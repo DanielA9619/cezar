@@ -45,6 +45,7 @@ export const workflowStepSchema = z
     bashAllowlist: z.array(z.string()).optional(),
     // check step
     command: z.string().optional(),
+    timeoutSeconds: z.number().int().min(1).max(86400).optional(),
     onFail: z
       .object({
         retry: z.string().min(1),
@@ -69,6 +70,9 @@ export const workflowStepSchema = z
   })
   .refine((s) => !s.secrets || Boolean(s.command), {
     message: 'secrets: is for check steps only — an agent step never receives a secret',
+  })
+  .refine((s) => s.timeoutSeconds === undefined || Boolean(s.command), {
+    message: 'timeoutSeconds is for check steps only',
   });
 
 /**

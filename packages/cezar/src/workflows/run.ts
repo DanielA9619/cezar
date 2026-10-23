@@ -2,7 +2,7 @@ import { WorktreeLifecycleCoordinator } from '../worktree-lifecycle/coordinator.
 import type { TrackerAssociation } from '@open-mercato/cezar-contract';
 import { TrackerAgentBindingError } from '../server/tracker/agent-credentials.ts';
 import { createHash, randomUUID } from 'node:crypto';
-import { spawn } from 'node:child_process';
+import { executeLifecycleCommand } from '../worktree-lifecycle/executor.ts';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { assertCezarHomeWriteIsSandboxed, cezarHomeDir } from '../paths.ts';
@@ -1992,10 +1992,17 @@ export class RunManager {
     // A crash never reaches `dropActive`, so its temp directory (#785) outlived the run.
     // Startup is the one moment we know which runs are still live, so sweep every other
     // per-run directory here — bounded to `<dataDir>/tmp`, never a sibling.
-    sweepAgentTmpDirs(this.dataDir, live.map((r) => r.id));
+    const retainedTmp = new Set(live.map(run => run.id));
+    for (const run of this.store.listRuns()) if (this.cleanupBlocked(run.id)) retainedTmp.add(run.id);
+    sweepAgentTmpDirs(this.dataDir, [...retainedTmp]);
     for (const run of live) {
       if (this.lifecycle.isBlocked(run.id)) {
         this.store.updateRun(run.id, {status: 'waiting', error: 'Worktree scripts need an explicit recovery action'});
+        continue;
+      }
+      if (this.cleanupBlocked(run.id)) {
+        this.store.updateRun(run.id, { status: 'failed', error: 'Previous process-tree cleanup is unconfirmed; automatic recovery is blocked', finishedAt: new Date().toISOString(), currentStepId: undefined });
+        this.store.appendEvent(run.id, { type: 'lifecycle', message: 'automatic recovery blocked — process-tree cleanup is unconfirmed; retain the worktree' });
         continue;
       }
       if (run.status === 'queued') {
@@ -2247,7 +2254,7 @@ export class RunManager {
     // unconditionally — it is scratch, not an artifact, so unlike a worktree
     // there is no keep-count to respect and nothing left to recover from it. A
     // Continue (or an auto-resume) re-creates it through `agentEnv`.
-    removeAgentTmpDir(this.dataDir, runId);
+    if (!this.cleanupBlocked(runId)) removeAgentTmpDir(this.dataDir, runId);
   }
 
   // ---- task dispatch (spec 2026-09-10-dispatch) ----------------------------------------------
@@ -3361,7 +3368,7 @@ export class RunManager {
   async cancelAndWait(runId: string): Promise<boolean> {
     const state = this.active.get(runId);
     const result = state?.session?.result;
-    if (!this.isActive(runId)) return true;
+    if (!this.isActive(runId)) return !this.cleanupBlocked(runId);
     if (!this.cancel(runId)) return false;
     // A run cancelled while `starting` has no session yet: it leaves once its gate await returns.
     if (!result) return this.cancelledStarting.has(runId) ? this.waitInactive(runId, 10_000) : !this.isActive(runId);
@@ -3371,7 +3378,7 @@ export class RunManager {
       new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(false), 10_000); }),
     ]);
     if (timer) clearTimeout(timer);
-    return settled && !this.isActive(runId);
+    return settled && await this.waitInactive(runId, 1000) && !this.cleanupBlocked(runId);
   }
 
   private async waitInactive(runId: string, timeoutMs: number): Promise<boolean> {
@@ -3832,6 +3839,7 @@ export class RunManager {
    *  over), "Finish" is the third review exit: accept the changes without a
    *  PR and flip straight to `done`. */
   finish(runId: string): boolean {
+    if (!this.isActive(runId) && this.cleanupBlocked(runId)) return false;
     const state = this.active.get(runId);
     if (state?.graphFinish && !state.session?.open) {
       this.store.appendEvent(runId, { type: 'lifecycle', message: 'finished by user at a workflow wait' });
@@ -3932,6 +3940,7 @@ export class RunManager {
     if (this.active.has(runId) || this.starting.has(runId)) return { ok: false, error: 'run is still active' };
     const run = this.store.getRun(runId);
     if (!run) return { ok: false, error: 'not found' };
+    if (this.cleanupBlocked(runId)) return { ok: false, error: 'Previous process-tree cleanup is unconfirmed; retain the worktree for manual recovery' };
     // `review` is continuable too — that's the "Send back" path (spec 009).
     if (!['done', 'failed', 'cancelled', 'review'].includes(run.status)) {
       return { ok: false, error: `cannot continue a ${run.status} run` };
@@ -4552,7 +4561,7 @@ export class RunManager {
     state.grantedAttachmentLibrary = this.prepareAttachmentLibrary();
     const launch = (launchSessionId: string, resume: boolean, context: string | undefined): AgentSession => {
       const contextualOpeningPrompt = withContext(context);
-      const started = runner.startSession(
+      const started = this.ownAgentSession(runId, runner.startSession(
         {
           // The Continue step is a fresh agent session on the same run — the
           // run's extra system prompt (already resolved at execute time and
@@ -4581,15 +4590,16 @@ export class RunManager {
           model: continueModel,
           sessionId: launchSessionId,
           resume,
-          timeoutMs: 0,
+          timeoutMs: state.autonomous ? undefined : 0,
         },
         onEvent,
         {
+          beforeProcessStart: () => this.checkpointAgentProcess(runId),
           onUiEvent: (event) => {
             if (!resumeGuard.holdUi(event)) this.handleRunnerUiEvent(runId, state, sink, event);
           },
         },
-      );
+      ));
       state.session = resume ? resumeGuard.track(started) : started;
       state.sessionEverOpened = true;
       this.flushDeferred(runId);
@@ -4664,6 +4674,21 @@ export class RunManager {
       } else {
         this.store.updateStep(runId, stepId, { status: 'done', finishedAt: finishedAt() });
         this.store.appendEvent(runId, { type: 'step-end', stepId, status: 'done' });
+        // A continuation can change the verified tree; the old verdict no longer applies.
+        const priorOutputs = new Map(Object.entries(record?.graphState?.outputs ?? {}));
+        const checks = record?.workflowDef?.steps.filter(step => stepKind(step) === 'check' &&
+          (!record.workflowDef?.graph || record.steps.some(prior => prior.id === step.id && prior.iterations > 0))) ?? [];
+        for (const definition of checks) {
+          if (state.cancelled) break;
+          const check = { ...definition, command: renderNodeRefs(definition.command!, priorOutputs) };
+          this.store.updateRun(runId, { currentStepId: check.id });
+          this.store.updateStep(runId, check.id, { status: 'running', iterations: (this.store.getRun(runId)?.steps.find(step => step.id === check.id)?.iterations ?? 0) + 1 });
+          const checked = await this.runCheckStep(runId, state, check, event => this.store.appendEvent(runId, event));
+          priorOutputs.set(check.id, { exitCode: checked.exitCode, output: checked.output });
+          this.store.updateStep(runId, check.id, { status: checked.ok ? 'done' : 'failed', error: checked.ok ? undefined : checked.output, finishedAt: finishedAt() });
+          if (!checked.ok) throw new Error(`verification "${check.id}" failed after continuation: ${checked.output}`);
+        }
+        if (state.cancelled) return;
         await this.settleSuccess(runId);
         appendHandoffHeartbeat(this.dataDir, runId, `step "${stepId}" complete — status=done`);
       }
@@ -5356,36 +5381,12 @@ export class RunManager {
       } else {
         const rendered = nodeToStep(node);
         if (rendered.command) rendered.command = renderNodeRefs(rendered.command, outputs);
-        // Check commands are allowed to generate tracked output, but that output
-        // is verification residue rather than agent work. Save the agent's state
-        // before the command, then keep the command's changed paths excluded from
-        // later autosaves while leaving those files dirty for inspection.
-        const checkpoint =
-          state.cwd === this.repoRoot
-            ? 'nothing-to-do'
-            : await autosaveCommit(
-                state.cwd,
-                'turn end',
-                await currentCheckExclusions(state.cwd, state.autosaveExcludedPaths),
-              );
-        const checkpointSafe = checkpoint === 'committed' || checkpoint === 'nothing-to-do';
-        state.autosaveCheckpointBlocked = !checkpointSafe;
-        if (checkpointSafe) this.autosaveCheckpointBlockedRuns.delete(runId);
-        else this.autosaveCheckpointBlockedRuns.add(runId);
-        let checkResult: { ok: boolean; output: string; exitCode: number };
-        state.checkInProgress = true;
-        try {
-          checkResult = await this.runCheckStep(runId, state, rendered, emit);
-        } finally {
-          if (checkpointSafe && state.cwd !== this.repoRoot) {
-            await captureCheckArtifacts(state.cwd, state.autosaveExcludedPaths);
-          }
-          // Keep the periodic timer fenced until the ownership snapshot is complete;
-          // captureCheckArtifacts yields while reading git status.
-          state.checkInProgress = false;
-        }
-        const { ok, output, exitCode } = checkResult;
+        const { ok, output, exitCode } = await this.runCheckStep(runId, state, rendered, emit);
         if (state.cancelled) return null;
+        if (exitCode === -1 || this.cleanupBlocked(runId)) {
+          this.finishStep(runId, node.id, 'failed', output, emit);
+          return `check "${node.id}" interrupted or could not start; automatic retry is blocked: ${output}`;
+        }
         outputs.set(node.id, { exitCode, output });
         if (ok) {
           this.finishStep(runId, node.id, 'done', undefined, emit);
@@ -6644,7 +6645,7 @@ export class RunManager {
           model: backendModel,
           sessionId: launchSessionId,
           resume,
-          // Interactive sessions have no wall clock — the idle timer rules.
+          // Human-controlled interactive sessions use inactivity; autonomous work keeps the cap.
           //
           // A non-final step keeps its wall clock (`DEFAULT_RUN_TIMEOUT_MS`)
           // even though it may now park on a `CEZ:ASK` and sit open waiting for
@@ -6655,7 +6656,7 @@ export class RunManager {
           // strand the run — both close the session, and a park whose session
           // closed unanswered settles as `failed` with a Continue button (see
           // the `askPark` branch in `execute`), never as a run stuck `waiting`.
-          timeoutMs: interactive ? 0 : undefined,
+          timeoutMs: interactive && !state.autonomous ? 0 : undefined,
         },
         onEvent,
         {
@@ -6664,12 +6665,14 @@ export class RunManager {
           // the turn-end handler hold an intermediate `CEZ:ASK` session open for
           // the user's answer rather than have the runner close it first (#917).
           autoEndAfterFirstTurn: false,
+          beforeProcessStart: () => this.checkpointAgentProcess(runId),
           onUiEvent: (event) => {
             if (!resumeGuard.holdUi(event)) this.handleRunnerUiEvent(runId, state, sink, event);
           },
         },
       );
     const attach = (started: AgentSession, resume: boolean): AgentSession => {
+      started = this.ownAgentSession(runId, started);
       state.session = resume ? resumeGuard.track(started) : started;
       state.sessionEverOpened = true;
       // A Finish pressed on an earlier step's session is not a repeat of one on this session.
@@ -6781,6 +6784,7 @@ export class RunManager {
   /** Persist the invocation checkpoint before launching a runner. A throw or
    * process exit before `turn.started` therefore leaves a durable mismatch. */
   private beginUsageInvocation(runId: string, state: ActiveRun, stepId: string): void {
+    if (this.cleanupBlocked(runId)) throw new Error('Previous process-tree cleanup is unconfirmed; refusing an automatic retry');
     const step = this.store.getRun(runId)?.steps.find((candidate) => candidate.id === stepId);
     if (!step) return;
     const epoch = (step.usageInvocationEpoch ?? 0) + 1;
@@ -6835,7 +6839,20 @@ export class RunManager {
       return;
     }
     invocation.recordedTurns.add(event.turnId);
+    const breakdown: Partial<StepState> = {};
+    for (const [wire, metric, counter] of [
+      ['total', 'rawTotalTokens', 'rawUsageTurnsRecorded'],
+      ['cacheRead', 'cacheReadTokens', 'cacheReadTurnsRecorded'],
+      ['cacheWrite', 'cacheWriteTokens', 'cacheWriteTurnsRecorded'],
+    ] as const) {
+      const value = event.usage?.[wire];
+      if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+        breakdown[metric] = (step[metric] ?? 0) + value;
+        breakdown[counter] = (step[counter] ?? 0) + 1;
+      }
+    }
     this.persistUsageCheckpoint(runId, invocation.stepId, {
+      ...breakdown,
       inputTokens: (step.inputTokens ?? 0) + input,
       outputTokens: (step.outputTokens ?? 0) + output,
       usageTurnsRecorded: (step.usageTurnsRecorded ?? 0) + 1,
@@ -6851,7 +6868,7 @@ export class RunManager {
     patch: Partial<Omit<StepState, 'id'>>,
   ): void {
     this.store.updateStep(runId, stepId, patch);
-    this.store.flush();
+    this.store.flush({ throwOnError: true });
   }
 
   /**
@@ -7069,6 +7086,10 @@ export class RunManager {
    * off — settle straight to `done`, leaving the diff in the worktree untouched.
    */
   private async settleSuccess(runId: string): Promise<void> {
+    if (this.cleanupBlocked(runId)) {
+      this.store.updateRun(runId, { status: 'failed', error: 'Process-tree cleanup is unconfirmed; acceptance is blocked', finishedAt: new Date().toISOString(), currentStepId: undefined });
+      return;
+    }
     const landingError = await this.landBeforeSettle(runId);
     if (landingError === 'review') {
       this.store.updateRun(runId, {
@@ -7972,6 +7993,30 @@ export class RunManager {
     await prunePrHeadRefs(this.repoRoot, needed).catch(() => undefined);
   }
 
+  private cleanupBlocked(runId: string): boolean {
+    const cleanup = this.store.getRun(runId)?.agentCleanup;
+    return cleanup === 'pending' || cleanup === 'uncertain';
+  }
+
+  private checkpointAgentProcess(runId: string): void {
+    if (this.cleanupBlocked(runId)) throw new Error('Previous process-tree cleanup is unconfirmed; refusing to launch another process');
+    this.store.updateRun(runId, { agentCleanup: 'pending' });
+    this.store.flush({ throwOnError: true });
+  }
+
+  private ownAgentSession(runId: string, session: AgentSession): AgentSession {
+    if (session.processQuiescent === undefined) return session;
+    if (!this.cleanupBlocked(runId)) this.checkpointAgentProcess(runId);
+    const settled = () => {
+      const agentCleanup = session.processQuiescent ? 'confirmed' : 'uncertain';
+      this.store.updateRun(runId, { agentCleanup });
+      this.store.appendEvent(runId, { type: 'process-cleanup', state: agentCleanup });
+      this.store.flush({ throwOnError: true });
+    };
+    session.result = session.result.then(value => { settled(); return value; }, error => { settled(); throw error; });
+    return session;
+  }
+
   private async runCheckStep(
     runId: string,
     state: ActiveRun,
@@ -7983,37 +8028,59 @@ export class RunManager {
     const env = await this.checkStepEnv(runId, state, step, emit);
     // A cancel that landed during the read had no child to interrupt; do not spawn one now.
     if (state.cancelled) return { ok: false, output: 'cancelled', exitCode: -1 };
-    return new Promise((resolve) => {
-      // Check steps run in the same cwd as the agent steps — the worktree.
-      const child = spawn('bash', ['-lc', command], { cwd: state.cwd, env });
-      state.interrupt = () => child.kill('SIGTERM');
-
-      let output = '';
-      const collect = (chunk: Buffer) => {
-        if (output.length < CHECK_OUTPUT_CAP) {
-          output += chunk.toString('utf8');
-          if (output.length >= CHECK_OUTPUT_CAP) output += '\n… (output truncated)';
-        }
-      };
-      child.stdout.on('data', collect);
-      child.stderr.on('data', collect);
-      child.on('error', (err) => {
-        state.interrupt = () => undefined;
-        const message = `failed to spawn: ${err.message}`;
-        emit({ type: 'check-output', stepId: step.id, command, text: message, exitCode: -1 });
-        resolve({ ok: false, output: message, exitCode: -1 });
+    if (this.cleanupBlocked(runId)) return { ok: false, output: 'Previous process-tree cleanup is unconfirmed; refusing verification', exitCode: -1 };
+    const controller = new AbortController();
+    state.interrupt = () => controller.abort();
+    let complete!: (result: AgentRunResult) => void;
+    let quiescent = false;
+    const checkSession: AgentSession = {
+      result: new Promise(resolve => { complete = resolve; }),
+      get processQuiescent() { return quiescent; },
+      open: false, sendMessage: () => false, end: () => controller.abort(),
+      interrupt: () => controller.abort(), hardStop: () => controller.abort(),
+    };
+    state.session = checkSession;
+    state.sessionEverOpened = true;
+    state.checkInProgress = true;
+    let checkpointSafe = false;
+    let output = '';
+    let outputTruncated = false;
+    try {
+      // Check residue must remain excluded from autosaves, including after Continue.
+      const checkpoint = state.cwd === this.repoRoot ? 'nothing-to-do' : await autosaveCommit(state.cwd, 'turn end', await currentCheckExclusions(state.cwd, state.autosaveExcludedPaths));
+      checkpointSafe = checkpoint === 'committed' || checkpoint === 'nothing-to-do';
+      state.autosaveCheckpointBlocked = !checkpointSafe;
+      if (checkpointSafe) this.autosaveCheckpointBlockedRuns.delete(runId);
+      else this.autosaveCheckpointBlockedRuns.add(runId);
+      const result = await executeLifecycleCommand({ command, cwd: state.cwd, env, loginShell: true, timeoutSeconds: step.timeoutSeconds,
+        executeInDryRun: true, signal: controller.signal,
+        onStart: async () => { this.checkpointAgentProcess(runId); },
+        onOutput: frame => {
+          if (output.length + frame.text.length > CHECK_OUTPUT_CAP) outputTruncated = true;
+          if (output.length < CHECK_OUTPUT_CAP) output += frame.text.slice(0, CHECK_OUTPUT_CAP - output.length);
+        },
       });
-      child.on('close', (code) => {
+      quiescent = result.quiescent;
+      this.store.updateRun(runId, { agentCleanup: result.quiescent ? 'confirmed' : 'uncertain' });
+      this.store.flush();
+      const text = (output + (outputTruncated ? '\n… (output truncated)' : '') + (result.reason ? `\n${result.reason}` : '')).trim() || '(no output)';
+      const exitCode = result.state === 'succeeded' ? 0 : result.state === 'interrupted' || !result.quiescent ? -1 : result.exitCode ?? -1;
+      emit({ type: 'check-output', stepId: step.id, command, text, exitCode, quiescent: result.quiescent, truncated: result.truncated || outputTruncated });
+      return { ok: result.state === 'succeeded', output: text, exitCode };
+    } catch (error) {
+      const text = error instanceof Error ? error.message : String(error);
+      emit({ type: 'check-output', stepId: step.id, command, text, exitCode: -1, quiescent });
+      return { ok: false, output: text, exitCode: -1 };
+    } finally {
+      try {
+        if (checkpointSafe && state.cwd !== this.repoRoot) await captureCheckArtifacts(state.cwd, state.autosaveExcludedPaths);
+      } finally {
+        state.checkInProgress = false;
         state.interrupt = () => undefined;
-        const trimmed = output.trim() || '(no output)';
-        // `code` is null when a signal killed the child; -1 then, the same value an
-        // unspawnable command reports, and one no `retryOn` list can name — neither
-        // is a verdict on the diff, so neither buys the agent another attempt.
-        const exitCode = code ?? -1;
-        emit({ type: 'check-output', stepId: step.id, command, text: trimmed, exitCode });
-        resolve({ ok: code === 0, output: trimmed, exitCode });
-      });
-    });
+        if (state.session === checkSession) state.session = undefined;
+        complete({ text: output, tokensUsed: 0, toolCalls: [] });
+      }
+    }
   }
 
   private finishStep(

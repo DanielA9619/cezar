@@ -1,4 +1,5 @@
-import { spawn as nodeSpawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { spawnAgentProcess } from './supervised-agent-process.ts';
 import { trackChildExit } from './agent-runner.ts';
 import { buildChildEnv } from './agent-env.ts';
 import { disclaimedCommand } from './disclaim-spawn.ts';
@@ -30,11 +31,12 @@ export function spawnCodexAppServer(
   bin: string,
   cwd: string,
   extraEnv?: Record<string, string>,
+  beforeStart?: () => void,
 ): ChildProcessWithoutNullStreams {
   try {
     const env = buildCodexAppServerEnv(extraEnv);
     const [file, argv] = disclaimedCommand(bin, ['app-server'], env);
-    return nodeSpawn(file, argv, { cwd, env });
+    return spawnAgentProcess(file, argv, { cwd, env }, beforeStart);
   } catch (error) {
     throw codexSpawnError(error, bin);
   }

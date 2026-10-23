@@ -172,6 +172,13 @@ describe('snapshot persistence policy', () => {
     expect(persisted).toHaveLength(3); // same total, new cost — persisted
   });
 
+  it('retains cache breakdown changes even when total usage is unchanged', () => {
+    const { sink, persisted } = recorder();
+    sink.handle({ type: 'usage.updated', usage: { input: 100, output: 50, cacheRead: 10, total: 150 } });
+    sink.handle({ type: 'usage.updated', usage: { input: 100, output: 50, cacheRead: 20, total: 150 } });
+    expect(persisted).toHaveLength(2);
+  });
+
   it('v2 image events are dropped (the v1 image pipeline owns screenshots)', () => {
     const { sink, persisted, live } = recorder();
     sink.handle({ type: 'image', itemId: 'tool_1', mediaType: 'image/png', data: 'aGk=' });

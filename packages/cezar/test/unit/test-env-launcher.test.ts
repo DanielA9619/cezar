@@ -97,7 +97,7 @@ function descriptor(root: string): { baseUrl: string; app: { pid: number } } {
 for (const withSetsid of [true, false]) {
   test(
     `generated launcher survives its caller and stops by descriptor PID (${withSetsid ? 'setsid' : 'nohup fallback'})`,
-    { skip: withSetsid && !hasSetsid ? 'setsid is not available on this platform' : false },
+    { skip: process.platform === 'win32' ? 'POSIX launcher; Windows Job Object supervision is tested separately' : withSetsid && !hasSetsid ? 'setsid is not available on this platform' : false },
     async () => {
       const fixture = makeFixture(withSetsid);
       const env = { ...process.env, PATH: fixture.path, TEST_ENV_CACHE_TTL_SECONDS: '600' };

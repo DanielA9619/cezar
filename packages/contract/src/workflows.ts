@@ -34,6 +34,7 @@ export const workflowStepDefSchema = z
     bashAllowlist: z.array(z.string()).optional(),
     // check step
     command: z.string().optional(),
+    timeoutSeconds: z.number().int().min(1).max(86400).optional(),
     onFail: z
       .object({
         retry: z.string().min(1),
@@ -51,6 +52,9 @@ export const workflowStepDefSchema = z
   })
   .refine((s) => !s.secrets || Boolean(s.command), {
     message: 'secrets: is for check steps only — an agent step never receives a secret',
+  })
+  .refine((s) => s.timeoutSeconds === undefined || Boolean(s.command), {
+    message: 'timeoutSeconds is for check steps only',
   });
 export type WorkflowStepDef = z.infer<typeof workflowStepDefSchema>;
 
@@ -112,6 +116,7 @@ export const workflowGraphNodeSchema = z.discriminatedUnion('type', [
     ...graphNodeBase,
     type: z.literal('check'),
     command: z.string().min(1),
+    timeoutSeconds: z.number().int().min(1).max(86400).optional(),
     retryOn: z.array(z.number().int().positive()).optional(),
     secrets: stepSecretsSchema.optional(),
   }),

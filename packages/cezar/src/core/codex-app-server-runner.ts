@@ -1,4 +1,5 @@
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
+import { confirmAgentProcessExit, agentProcessQuiescent } from './supervised-agent-process.ts';
 import type {
   AgentEvent,
   AgentRunResult,
@@ -151,7 +152,7 @@ class CodexSession implements AgentSession {
   /** "Has the app-server really terminated?" — the question `child.killed`
    *  does not answer: it flips on signal delivery, so the SIGTERM this runner
    *  sends would otherwise veto its own SIGKILL escalation (#844). */
-  private readonly hasExited: () => boolean;
+  private readonly hasExited!: () => boolean;
   /** Protocol v2 emission — additive alongside v1 (`onEvent` keeps flowing
    *  byte-identical); the channel is `opts.onUiEvent` (RunManager wiring
    *  lands in R2 step 2.1). */
@@ -166,8 +167,9 @@ class CodexSession implements AgentSession {
     private readonly opts: SessionOptions,
   ) {
     try {
-      this.child = spawnCodexAppServer(bin, spec.cwd, spec.env);
+      this.child = spawnCodexAppServer(bin, spec.cwd, spec.env, opts.beforeProcessStart);
       this.rpc = new CodexAppServerRpc(this.child);
+      this.child.once('close', () => this.rpc.rejectPending());
     } catch (err) {
       throw codexSpawnError(err, bin);
     }
@@ -239,19 +241,21 @@ class CodexSession implements AgentSession {
           this.end();
         }
       } finally {
-        if (deadline) clearTimeout(deadline);
-        if (killTimer) clearTimeout(killTimer);
+        if (!this.hasExited()) this.end();
         if (this.autoEndTimer) clearTimeout(this.autoEndTimer);
         this.stdinOpen = false;
       }
 
       const exitCode = await waitForCodexAppServerExit(this.child);
+      if (deadline) clearTimeout(deadline);
+      if (killTimer) clearTimeout(killTimer);
       if (this.eofTermTimer) clearTimeout(this.eofTermTimer);
         if (this.eofKillTimer) clearTimeout(this.eofKillTimer);
         if (this.hardKillTimer) clearTimeout(this.hardKillTimer);
       this.rpc.rejectPending();
 
       if (this.spawnFailed) throw this.spawnFailed;
+      await confirmAgentProcessExit(this.child);
       if (sessionError) throw sessionError;
 
       // Timeout/interrupt can end the read loop mid-item — recover buffered prose.
@@ -301,6 +305,10 @@ class CodexSession implements AgentSession {
 
   get pid(): number | undefined {
     return this.child.pid;
+  }
+
+  get processQuiescent(): boolean | undefined {
+    return agentProcessQuiescent(this.child);
   }
 
   sendMessage(content: ContentBlock[]): boolean {

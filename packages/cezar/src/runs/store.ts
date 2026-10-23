@@ -89,6 +89,12 @@ const stepStateSchema = z.object({
   tokensUsed: z.number(),
   inputTokens: usageCounterSchema.optional(),
   outputTokens: usageCounterSchema.optional(),
+  rawTotalTokens: usageCounterSchema.optional(),
+  cacheReadTokens: usageCounterSchema.optional(),
+  cacheWriteTokens: usageCounterSchema.optional(),
+  rawUsageTurnsRecorded: usageCounterSchema.optional(),
+  cacheReadTurnsRecorded: usageCounterSchema.optional(),
+  cacheWriteTurnsRecorded: usageCounterSchema.optional(),
   usageInvocationsStarted: usageCounterSchema.optional(),
   usageInvocationsObserved: usageCounterSchema.optional(),
   usageTurnsStarted: usageCounterSchema.optional(),
@@ -140,6 +146,7 @@ export type RunPrRef = z.infer<typeof prRefSchema>;
 /** Exported for `./run-index.ts`, the read-only reader of the same file. Nothing else should
  *  parse `runs.json` — see `reconcileLoadedRun` for why a second parser is a correctness risk. */
 export const runRecordSchema = z.object({
+  agentCleanup: z.enum(['pending', 'confirmed', 'uncertain']).optional(),
   id: z.string(),
   title: z.string(),
   /** Display title (#389): the auto-derived summary of the first agent turn,
@@ -329,6 +336,9 @@ export const runRecordSchema = z.object({
   tokensUsed: z.number(),
   inputTokens: usageCounterSchema.optional(),
   outputTokens: usageCounterSchema.optional(),
+  rawTotalTokens: usageCounterSchema.optional(),
+  cacheReadTokens: usageCounterSchema.optional(),
+  cacheWriteTokens: usageCounterSchema.optional(),
   costUsd: z.number().optional(),
   /** First GitHub PR URL spotted in the transcript (the janitor trick). */
   pullRequestUrl: z.string().optional(),
@@ -1276,6 +1286,14 @@ export class RunStore extends EventEmitter {
     run.outputTokens = directionalComplete
       ? startedAgentSteps.reduce((sum, candidate) => sum + (candidate.outputTokens ?? 0), 0)
       : undefined;
+    for (const [metric, counter] of [
+      ['rawTotalTokens', 'rawUsageTurnsRecorded'],
+      ['cacheReadTokens', 'cacheReadTurnsRecorded'],
+      ['cacheWriteTokens', 'cacheWriteTurnsRecorded'],
+    ] as const) {
+      run[metric] = directionalComplete && startedAgentSteps.every(step => step[metric] !== undefined && step[counter] === step.usageTurnsRecorded)
+        ? startedAgentSteps.reduce((sum, step) => sum + (step[metric] ?? 0), 0) : undefined;
+    }
     const cost = run.steps.reduce((sum, s) => sum + (s.costUsd ?? 0), 0);
     // A reported zero is still a measurement; an unreported run is not free.
     run.costUsd = run.steps.some((s) => s.costUsd !== undefined) ? cost : undefined;

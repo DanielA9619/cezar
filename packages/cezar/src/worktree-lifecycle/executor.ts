@@ -22,6 +22,10 @@ export interface LifecycleExecutorOptions {
   timeoutSeconds?: number;
   signal?: AbortSignal;
   dryRun?: boolean;
+  /** Workflow checks still execute under a mocked agent, matching the historical check path. */
+  executeInDryRun?: boolean;
+  env?: NodeJS.ProcessEnv;
+  loginShell?: boolean;
   /** A durable start checkpoint. The child waits at a pipe gate until this resolves. */
   onStart?: (identity: LifecycleProcessIdentity) => Promise<void>;
   onOutput?: (frame: LifecycleExecutorOutput) => Promise<void> | void;
@@ -87,7 +91,7 @@ function powershellPath(): string {
 export async function executeLifecycleCommand(options: LifecycleExecutorOptions): Promise<LifecycleExecutionResult> {
   const timeout = options.timeoutSeconds ?? LIFECYCLE_DEFAULT_TIMEOUT_SECONDS;
   if (!Number.isFinite(timeout) || timeout < 1 || timeout > 86400) throw new Error('Lifecycle timeout must be 1–86400 seconds');
-  if (options.dryRun || process.env.CEZ_DRY_RUN === '1') return { state: 'succeeded', exitCode: 0, quiescent: true, truncated: false };
+  if (options.dryRun || (!options.executeInDryRun && process.env.CEZ_DRY_RUN === '1')) return { state: 'succeeded', exitCode: 0, quiescent: true, truncated: false };
   if (options.signal?.aborted) return { state: 'interrupted', exitCode: null, reason: 'Stopped before launch', quiescent: true, truncated: false };
   const windows = (options.platform ?? process.platform) === 'win32';
   const completionMarker = `__cezar_${randomUUID().replaceAll('-', '')}`;
@@ -157,14 +161,14 @@ export async function executeLifecycleCommand(options: LifecycleExecutorOptions)
   const bash = resolveLifecycleBash(options.bashPath, windows);
   if (!bash) return {state: 'failed', exitCode: null, reason: 'Git Bash was not found; lifecycle command was not started', quiescent: true, truncated: false};
   const helperPath = join(dirname(fileURLToPath(import.meta.url)), '../../src/worktree-lifecycle/windows-process-supervisor.ps1');
-  const windowsPayload = Buffer.from(JSON.stringify({executable: bash, command: options.command, cwd: options.cwd, nonce: completionMarker}), 'utf8').toString('base64');
-  const wrapper = 'IFS= read -r _cezar_launch || exit 125; exec "$0" -c "$1"';
+  const windowsPayload = Buffer.from(JSON.stringify({executable: bash, command: options.command, cwd: options.cwd, nonce: completionMarker, loginShell: options.loginShell}), 'utf8').toString('base64');
+  const wrapper = `IFS= read -r _cezar_launch || exit 125; exec "$0" ${options.loginShell ? '-lc' : '-c'} "$1"`;
   const child = windows
     ? spawn(options.windowsSupervisorPath ?? powershellPath(), ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', helperPath, windowsPayload], {
-      cwd: options.cwd, env: process.env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
+      cwd: options.cwd, env: options.env ?? process.env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
     })
     : spawn(bash, ['-c', wrapper, bash, options.command], {
-      cwd: options.cwd, env: process.env, detached: true, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
+      cwd: options.cwd, env: options.env ?? process.env, detached: true, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
     });
   const closed = new Promise<void>(resolve => child.once('close', () => { childClosed = true; resolve(); }));
   child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');

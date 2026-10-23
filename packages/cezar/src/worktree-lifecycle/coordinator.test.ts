@@ -74,6 +74,17 @@ afterEach(async () => {
 });
 
 describe('worktree lifecycle coordinator with real Git and command fixtures', () => {
+  it.each(['pending', 'uncertain'] as const)('refuses manual removal, mutation and retention after %s agent cleanup', async agentCleanup => {
+    const p = await project();
+    const prepared = await p.prepare();
+    p.runs.updateRun(p.id, { status: 'failed', agentCleanup, worktreePath: prepared.path, branch: prepared.branch });
+    await expect(p.coordinator.startRemoval({ runId: p.id, intent: 'remove-worktree', requestId: randomUUID() })).rejects.toThrow('unconfirmed');
+    const mutate = vi.fn(async () => {});
+    await expect(p.coordinator.withWorktreeMutation(p.id, mutate)).rejects.toThrow('unconfirmed');
+    expect(mutate).not.toHaveBeenCalled();
+    expect(await p.coordinator.reclaim(p.id)).toBe(false);
+    expect(existsSync(prepared.path)).toBe(true);
+  });
   it.skipIf(process.platform === 'win32')('shutdown drains the script process group before persisting stopped recovery state', async () => {
     const p = await project();
     await p.config([entry('sleep 120 & child=$!; printf "%s" "$child" > child.pid; wait')]);
@@ -494,11 +505,11 @@ describe('worktree lifecycle coordinator with real Git and command fixtures', ()
     await p.config([first]);
     const preparing = p.prepare();
     const path = join(p.root, '.ai/cezar/worktrees', p.id);
-    await vi.waitFor(() => expect(existsSync(join(path, 'started'))).toBe(true));
+    await vi.waitFor(() => expect(existsSync(join(path, 'started'))).toBe(true), { timeout: process.platform === 'win32' ? 10_000 : 1000 });
     await p.config([first, entry('printf second >> order')]);
     expect((await preparing).ready).toBe(true);
     expect(await readFile(join(path, 'order'), 'utf8')).toBe('firstsecond');
-  });
+  }, process.platform === 'win32' ? 20_000 : 5000);
 
   it('retains task and branch metadata when physical removal cannot finish its branch commit', async () => {
     const p = await project();

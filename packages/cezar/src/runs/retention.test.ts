@@ -29,6 +29,10 @@ function run(partial: {
 }
 
 describe('selectReclaimableWorktrees (#483)', () => {
+  it.each(['pending', 'uncertain'] as const)('retains worktrees with %s process cleanup proof', agentCleanup => {
+    const record = { ...run({ id: 'uncertain', status: 'failed' }), agentCleanup };
+    expect(isReclaimable(record)).toBe(false);
+  });
   it('keeps the newest N finished worktrees and reclaims the older ones', () => {
     const runs = [
       run({ id: 'a', status: 'done', finishedAt: '2026-07-01T00:00:00Z' }),

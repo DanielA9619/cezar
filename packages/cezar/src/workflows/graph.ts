@@ -75,6 +75,7 @@ export const graphNodeSchema = z.discriminatedUnion('type', [
     ...nodeBase,
     type: z.literal('check'),
     command: z.string().min(1),
+    timeoutSeconds: z.number().int().min(1).max(86400).optional(),
     /** v1 compatibility: only these non-zero exits are eligible for an onFail retry. */
     retryOn: z.array(z.number().int().positive()).optional(),
     /** The secrets this command may read (see `workflowStepSchema.secrets`). */
