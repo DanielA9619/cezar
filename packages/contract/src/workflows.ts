@@ -183,6 +183,7 @@ export type WorkflowGraph = z.infer<typeof workflowGraphSchema>;
 export const workflowDefSchema = z.object({
   name: z.string(),
   description: z.string().optional(),
+  requiresReview: z.boolean().optional(),
   steps: z.array(workflowStepDefSchema),
   /** Present on `version: 2` graph workflows only; `steps` is then derived from its nodes. */
   graph: workflowGraphSchema.optional(),

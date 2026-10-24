@@ -1,5 +1,6 @@
 name: reliable-npm-task
 description: Claude implementation followed by a Cezar-owned npm test gate (at most two corrections).
+requiresReview: true
 steps:
   - id: implement
     prompt: >-

@@ -513,6 +513,15 @@ async function respond(userText, imageCount) {
   }
 
   if (turn === 1) {
+    // Deterministic verification fixture: the first simulated implementation is
+    // genuinely wrong. Only a retry carrying the check's failure output repairs
+    // it. `mock:stubborn-slug` exercises exhausted correction attempts.
+    if (userText.includes('mock:repair-slug') || userText.includes('mock:stubborn-slug')) {
+      const corrected = userText.includes('EXPECTED_SLUG_FAILURE') && !userText.includes('mock:stubborn-slug');
+      writeFileSync('src/slug.js', corrected
+        ? "export function slugifyTitle(input) { return input.trim().toLowerCase().replace(/[\\s-]+/g, '-'); }\n"
+        : "export function slugifyTitle(_input) { return 'wrong'; }\n");
+    }
     // Leave a visible trace in the cwd (the task worktree under spec 006) so
     // the Diff view has something real to show in dry runs. Exactly one line
     // per spawned session: tests read this file back as a per-step trace, so

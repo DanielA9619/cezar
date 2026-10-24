@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Hono } from 'hono';
@@ -9,6 +9,48 @@ import type { WorkflowDef } from '../workflows/types.ts';
 import { createApp } from './server.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
 import { connectedProviderAuth } from './provider-auth.testkit.ts';
+
+describe('POST /api/v1/runs required-review preflight', () => {
+  let root: string;
+  let store: RunStore;
+  let app: Hono;
+  let starts: number;
+  const saved = process.env.CEZ_REVIEW_GATE;
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'cez-review-preflight-'));
+    const dir = join(root, '.ai/cezar/workflows');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'required.yaml'), 'name: required\nrequiresReview: true\nsteps:\n  - id: work\n    prompt: "{{task}}"\n');
+    store = RunStore.open(join(root, '.ai/cezar'));
+    starts = 0;
+    const manager = { startRun: () => { starts++; return store.createRun({ title: 't', workflow: 'required', task: 'x', steps: [] }); } } as unknown as RunManager;
+    app = createApp({ repoRoot: root, store, manager, version: 'test', providerAuth: connectedProviderAuth() });
+  });
+  afterEach(() => {
+    store.flush();
+    rmSync(root, { recursive: true, force: true });
+    if (saved === undefined) delete process.env.CEZ_REVIEW_GATE;
+    else process.env.CEZ_REVIEW_GATE = saved;
+  });
+  const post = () => apiRequest(app, '/api/v1/runs', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ workflow: 'required', task: 'x', worktree: true }),
+  });
+  it('returns 409 before creating a run when review is disabled', async () => {
+    process.env.CEZ_REVIEW_GATE = '0';
+    expect((await post()).status).toBe(409);
+    expect(starts).toBe(0);
+  });
+  it('uses the project toggle over the environment setting', async () => {
+    process.env.CEZ_REVIEW_GATE = '1';
+    writeFileSync(join(root, '.ai/cezar/config.json'), JSON.stringify({ reviewGate: false }));
+    expect((await post()).status).toBe(409);
+    expect(starts).toBe(0);
+    writeFileSync(join(root, '.ai/cezar/config.json'), JSON.stringify({ reviewGate: true }));
+    expect((await post()).status).toBe(201);
+    expect(starts).toBe(1);
+  });
+});
 
 /**
  * `POST /api/v1/runs` `systemPrompt` (R2 2.3) — the programmatic per-run

@@ -665,6 +665,19 @@ steps:
 Parallel variants (×2/×3) of one task share that task's backend — mixing
 happens per task and per step, not inside a variant group.
 
+For a workflow that promises a human review, set `requiresReview: true` at
+the YAML top level. Cezar checks the effective review-gate setting before
+starting any agent and fails closed if it is off or the task would skip review
+(autonomous, read-only, or in-place). The project Settings toggle overrides
+`CEZ_REVIEW_GATE=1`. A required-review run with no reviewable diff also fails
+rather than silently finishing as `done`.
+
+`cezar roadmap preview --input <planning.json>` produces a local planning-only
+queue and stores its decisions under `CEZ_HOME/roadmap/preview.json`. An
+explicit `--github` refresh reads approved issues from allowlisted registered
+projects. This command never starts agents; every preview row has
+`executionEligible: false`.
+
 The seam is deliberately small: a backend is one class implementing the
 `AgentRunner` interface (`packages/cezar/src/core/agent-runner.ts`) that turns a prompt into
 a stream of normalized events. Other CLIs — pi, aider, whatever ships next —

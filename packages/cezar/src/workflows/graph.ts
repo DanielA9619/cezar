@@ -164,6 +164,7 @@ export const workflowGraphFileSchema = workflowGraphSchema.extend({
   version: z.literal(2),
   name: z.string().min(1),
   description: z.string().optional(),
+  requiresReview: z.boolean().optional(),
 });
 
 export type GraphNode = z.infer<typeof graphNodeSchema>;

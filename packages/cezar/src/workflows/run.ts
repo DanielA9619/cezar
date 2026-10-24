@@ -132,7 +132,7 @@ import {
 import { extractTaskRefs, refineTaskRefs, titleRefNumber } from '../runs/task-refs.ts';
 import { parseTaskMarkers, stripTaskMarkers } from '../runs/task-markers.ts';
 import { autoNamingActive, generateRunName, liveTitleUpdatesEnabled, NAMER_TIMEOUT_MS, postValidateTitle } from '../runs/auto-name.ts';
-import { reviewGateEnabled } from '../runs/review-gate.ts';
+import { reviewGateEnabled, reviewPreflightError } from '../runs/review-gate.ts';
 import { resolveProfileEnvForRoot } from '../workspace/agent-profiles.ts';
 import { DEFAULT_AGENT_ACCOUNT_ID } from '../workspace/agent-accounts.ts';
 import { WorkspaceSemaphore, type AccountHolds } from '../workspace/semaphore.ts';
@@ -4471,6 +4471,15 @@ export class RunManager {
       });
       this.dropActive(runId, state);
     };
+    const reviewError = reviewPreflightError(
+      record?.workflowDef?.requiresReview,
+      await loadConfig(this.repoRoot),
+      { autonomous: record?.autonomous, worktree: record?.worktreePath ? true : record?.worktree, readOnly: record?.readOnly },
+    );
+    if (reviewError) {
+      failBeforeSpawn(reviewError);
+      return;
+    }
     // Apply the SAME canonical-identity gate the first spawn applies (#405, review M1).
     // A follow-up may switch both runner and model (#401), so without this the record keeps
     // asserting the identity the run STARTED with while a different model serves the turn —
@@ -4750,6 +4759,13 @@ export class RunManager {
     // Resolve the agent backend for this run: the task choice (GUI) wins over
     // the config default. Per-step `runner` can still override it below.
     const config = await loadConfig(this.repoRoot);
+    const reviewError = reviewPreflightError(workflow.requiresReview, config, input);
+    if (reviewError) {
+      this.store.updateRun(runId, { status: 'failed', error: reviewError, finishedAt: new Date().toISOString() });
+      emit({ type: 'lifecycle', message: `run refused — ${reviewError}` });
+      this.dropActive(runId, state);
+      return;
+    }
     const taskBackend: RunnerId = input.runner ?? config.defaultRunner;
     // The account may have gone into a usage-limit hold since this run was dequeued — the queue
     // gate cannot be the only one, because dequeue is not the moment of no return. Nothing has
@@ -7115,6 +7131,12 @@ export class RunManager {
       return;
     }
     const review = await this.reviewGateApplies(runId);
+    if (!review && this.store.getRun(runId)?.workflowDef?.requiresReview) {
+      const error = 'workflow requires review, but no review diff or enabled gate was available at settlement';
+      this.store.updateRun(runId, { status: 'failed', error, finishedAt: new Date().toISOString(), currentStepId: undefined });
+      this.store.appendEvent(runId, { type: 'lifecycle', message: `run failed — ${error}` });
+      return;
+    }
     this.store.updateRun(runId, {
       status: review ? 'review' : 'done',
       finishedAt: new Date().toISOString(),

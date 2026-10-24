@@ -84,6 +84,7 @@ export const workflowFileSchema = z
   .object({
     name: z.string().min(1),
     description: z.string().optional(),
+    requiresReview: z.boolean().optional(),
     steps: z.array(workflowStepSchema).min(1).optional(),
     skills: z.array(z.string().trim().min(1)).min(1).optional(),
   })
@@ -104,6 +105,7 @@ export type WorkflowDoc = z.infer<typeof workflowFileSchema>;
 export const workflowDefSchema = z.object({
   name: z.string(),
   description: z.string().optional(),
+  requiresReview: z.boolean().optional(),
   steps: z.array(workflowStepSchema),
   /** A `version: 2` graph workflow (spec 2026-09-30-workflow-node-editor). When present the
    *  executor walks the graph; `steps` is then derived from its agent/check nodes
@@ -130,11 +132,13 @@ export function skillsToSteps(skills: string[]): WorkflowStepDef[] {
 export function normalizeWorkflowDoc(doc: WorkflowDoc): {
   name: string;
   description?: string;
+  requiresReview?: boolean;
   steps: WorkflowStepDef[];
 } {
   return {
     name: doc.name,
     ...(doc.description ? { description: doc.description } : {}),
+    ...(doc.requiresReview ? { requiresReview: true } : {}),
     steps: doc.steps ?? skillsToSteps(doc.skills ?? []),
   };
 }

@@ -61,11 +61,12 @@ export async function loadWorkflows(
           issues.push({ path, message: problems.join('; ') });
           continue;
         }
-        const { version, name, description, nodes, edges, layout } = graphDoc.data;
+        const { version, name, description, requiresReview, nodes, edges, layout } = graphDoc.data;
         void version;
         fromFiles.push({
           name,
           ...(description ? { description } : {}),
+          ...(requiresReview ? { requiresReview: true } : {}),
           steps: graphToSteps(graphDoc.data),
           graph: { nodes, edges, ...(layout ? { layout } : {}) },
           source: 'file',

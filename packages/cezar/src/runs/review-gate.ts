@@ -20,3 +20,21 @@ export function reviewGateEnabled(
   if (config.reviewGate !== undefined) return config.reviewGate;
   return env.CEZ_REVIEW_GATE === '1';
 }
+
+/** A workflow may promise a human review. Refuse it before any agent starts if
+ * the effective project settings cannot honor that promise. */
+export function reviewPreflightError(
+  requiresReview: boolean | undefined,
+  config: { reviewGate?: boolean; taskWorkspace?: string },
+  input: { autonomous?: boolean; worktree?: boolean; readOnly?: boolean },
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+  if (!requiresReview) return undefined;
+  if (!reviewGateEnabled(config, env)) return 'workflow requires review, but the review gate is disabled (enable Settings → Tasks review gate or CEZ_REVIEW_GATE=1)';
+  if (input.autonomous) return 'workflow requires review, but autonomous mode skips the review gate';
+  if (input.readOnly) return 'workflow requires review, but read-only tasks cannot produce a review diff';
+  if (input.worktree === false || (input.worktree === undefined && config.taskWorkspace === 'in-place')) {
+    return 'workflow requires review in an isolated worktree';
+  }
+  return undefined;
+}

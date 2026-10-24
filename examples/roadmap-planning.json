@@ -1,0 +1,21 @@
+{
+  "allowedRepositories": [
+    { "repo": "fictional/atlas" },
+    { "repo": "fictional/beacon" }
+  ],
+  "githubIssues": [
+    { "repo": "fictional/atlas", "number": 11, "title": "Add search filters", "url": "https://github.com/fictional/atlas/issues/11", "state": "open", "labels": ["roadmap-approved", "priority:p2"] },
+    { "repo": "fictional/beacon", "number": 7, "title": "Document alert recovery", "url": "https://github.com/fictional/beacon/issues/7", "state": "open", "labels": ["roadmap-approved", "priority:p3"] },
+    { "repo": "fictional/atlas", "number": 12, "title": "Explore export formats", "url": "https://github.com/fictional/atlas/issues/12", "state": "open", "labels": ["priority:p1"] },
+    { "repo": "fictional/other", "number": 3, "title": "Outside allowlist", "url": "https://github.com/fictional/other/issues/3", "state": "open", "labels": ["roadmap-approved", "priority:p1"] }
+  ],
+  "roadmaps": [
+    { "id": "atlas-index", "repo": "fictional/atlas", "title": "Index the search catalog", "priority": 1, "approval": "approved", "dependencies": [], "blockers": [], "preferredRunner": "codex" },
+    { "id": "beacon-queue", "repo": "fictional/beacon", "title": "Queue alert delivery", "priority": 2, "approval": "approved", "dependencies": ["beacon-schema"], "blockers": [], "preferredRunner": "claude" },
+    { "id": "beacon-schema", "repo": "fictional/beacon", "title": "Define alert schema", "priority": 1, "approval": "approved", "dependencies": [], "blockers": [], "preferredRunner": "claude" },
+    { "id": "atlas-release", "repo": "fictional/atlas", "title": "Cut release", "priority": 1, "approval": "approved", "dependencies": [], "blockers": ["release freeze"], "preferredRunner": "claude" },
+    { "id": "atlas-old", "repo": "fictional/atlas", "title": "Completed migration", "priority": 1, "approval": "approved", "dependencies": [], "blockers": [], "preferredRunner": "claude" }
+  ],
+  "runningTaskIds": ["fictional/atlas#11"],
+  "completedTaskIds": ["atlas-old"]
+}
