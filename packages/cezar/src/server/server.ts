@@ -52,6 +52,8 @@ import { homedir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Hono, type Context } from 'hono';
+import { queuePriorityInputSchema, queueResponseSchema } from '@open-mercato/cezar-contract';
+import { queuePreview, readQueueState, setPriority } from '../roadmap/queue.ts';
 import type { Next } from 'hono';
 import { serve, type ServerType } from '@hono/node-server';
 import { bodyLimit } from 'hono/body-limit';
@@ -7748,6 +7750,17 @@ export function createApp(deps: ServerDeps) {
 
   // Workspace-level families answer for the whole workspace, so they are single-mount: never a
   // project-scoped spelling, which would be a second surface to protect with no consumer.
+  const roadmapQueueRoutes = new Hono()
+    .get('/workspace/roadmap-queue', async (c) => {
+      try { return c.json(queueResponseSchema.parse(queuePreview(await readQueueState()))); }
+      catch { return c.json({ error: 'Roadmap queue is unavailable or unverified' }, 503); }
+    })
+    .patch('/workspace/roadmap-queue/priority', jsonZodValidator(queuePriorityInputSchema), async (c) => {
+      const { taskId, priority } = c.req.valid('json');
+      try { return c.json(queueResponseSchema.parse(await setPriority(taskId, priority))); }
+      catch (error) { return c.json({ error: error instanceof Error ? error.message : String(error) }, 409); }
+    });
+
   const workspaceV1 = new Hono()
     .route('/', healthRoutes)
     .route('/', modelsRoutes)
@@ -7765,6 +7778,7 @@ export function createApp(deps: ServerDeps) {
     .route('/', runsIndexRoutes)
     .route('/', dashboardRoutes(dashboard, () => ({ tokens: capabilities().tokenUsageMetrics, cost: capabilities().costMetrics }), () => capabilities().automations))
     .route('/', workspaceEventsRoutes)
+    .route('/', roadmapQueueRoutes)
     .route('/', telemetryRoutes);
 
   // ---- mount ---------------------------------------------------------------

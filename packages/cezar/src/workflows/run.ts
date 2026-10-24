@@ -7443,7 +7443,7 @@ export class RunManager {
     const diff = await worktreeDiff(run.worktreePath, run.baseBranch ?? 'HEAD');
     const hasDiff = diff.trim().length > 0 && !diff.startsWith('(diff failed');
     const config = await loadConfig(this.repoRoot);
-    return hasDiff && reviewGateEnabled(config) && run.autonomous !== true;
+    return hasDiff && reviewGateEnabled(config) && (run.autonomous !== true || run.workflowDef?.requiresReview === true);
   }
 
   /**

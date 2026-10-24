@@ -63,6 +63,11 @@ Usage:
   cezar automation <add|create|check|run|list|…>  create and manage automations (GitHub polls, schedules) on a running cockpit
   cezar runs list           list a running cockpit's tasks from a shell (CEZ_API_URL=http://127.0.0.1:4321)
   cezar roadmap preview --input <file> [--github]  rank approved work without launching agents
+  cezar roadmap queue load --input <file>      load an allowlisted planning queue
+  cezar roadmap queue refresh                  refresh allowlisted GitHub issues only
+  cezar roadmap queue show                     show the persisted planning queue
+  cezar roadmap queue authorize --input <file> record owner authorization (interactive terminal)
+  cezar roadmap queue revoke <task-id>         revoke owner authorization (interactive terminal)
   cezar init                scaffold .ai/cezar/ (example workflow + skill)
   cezar projects            list the projects this cockpit serves
                             (also: projects add [<dir>] · projects remove <id>)

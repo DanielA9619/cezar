@@ -7,9 +7,41 @@ import { loadWorkspaceConfig } from '../workspace/config.ts';
 import { fetchGithub } from '../server/forge/github.ts';
 import { readRunIndexFromDisk } from '../runs/run-index.ts';
 import { githubIssuesFromForge, planRoadmap, roadmapInputSchema } from './planner.ts';
+import { queueAuthorizationSchema } from '@open-mercato/cezar-contract';
+import { ownerAuthorization, queuePreview, readQueueState, saveQueueInput } from './queue.ts';
+import { refreshQueueGithub } from './github-source.ts';
 
 /** Explicit CLI only. No timer, server route, RunManager call, or agent spawn. */
 export async function runRoadmapCommand(args: string[]): Promise<number> {
+  if (args[0] === 'queue') {
+    try {
+      const command = args[1];
+      const inputAt = args.indexOf('--input');
+      const inputPath = inputAt >= 0 ? args[inputAt + 1] : undefined;
+      if (command === 'load' && inputPath) {
+        const raw = await readFile(resolve(inputPath), 'utf8');
+        if (raw.length > 1_000_000) throw new Error('planning input exceeds 1 MB');
+        await saveQueueInput(roadmapInputSchema.parse(JSON.parse(raw)));
+      } else if (command === 'refresh' && args.length === 2) {
+        await refreshQueueGithub();
+      } else if (command === 'authorize' && inputPath) {
+        const raw = await readFile(resolve(inputPath), 'utf8');
+        const authorization = queueAuthorizationSchema.omit({ audit: true }).parse(JSON.parse(raw));
+        await ownerAuthorization(authorization, 'grant', process.stdin.isTTY === true && !process.env.CEZ_TASK_ID);
+      } else if (command === 'revoke' && args[2]) {
+        const old = (await readQueueState()).authorizations.find((entry) => entry.taskId === args[2]);
+        if (!old) throw new Error('Authorization does not exist');
+        const { audit: _audit, ...input } = old;
+        await ownerAuthorization(input, 'revoke', process.stdin.isTTY === true && !process.env.CEZ_TASK_ID);
+      } else if (command !== 'show' || args.length !== 2) {
+        throw new Error('Usage: cezar roadmap queue load --input <planning.json> | refresh | show | authorize --input <authorization.json> | revoke <task-id>');
+      }
+      const preview = queuePreview(await readQueueState());
+      console.log(`Planning only — next: ${preview.nextTaskId ?? 'none'}; authorizations never start work`);
+      for (const row of preview.rows) console.log(`${row.status.padEnd(9)} P${row.priority} ${row.id} (${row.authorization}) — ${row.reason}`);
+      return 0;
+    } catch (error) { console.error(error instanceof Error ? error.message : String(error)); return 1; }
+  }
   if (args[0] !== 'preview') {
     console.error('Usage: cezar roadmap preview --input <planning.json> [--github]');
     return 1;
@@ -35,6 +67,9 @@ export async function runRoadmapCommand(args: string[]): Promise<number> {
         const data = await fetchGithub(project.root, true, 100);
         if (!data.available || data.repo?.toLowerCase() !== allowed.repo.toLowerCase()) {
           throw new Error(`GitHub issue source for ${allowed.repo} is unavailable or points to another repository`);
+        }
+        if (data.issuesNextCursor || data.issuesTotal !== data.issues.length) {
+          throw new Error(`GitHub issue source for ${allowed.repo} is incomplete; use roadmap queue refresh for paginated discovery`);
         }
         input.githubIssues.push(...githubIssuesFromForge(allowed.repo, data.issues));
         for (const run of readRunIndexFromDisk(join(project.root, '.ai', 'cezar'))) {

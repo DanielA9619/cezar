@@ -507,6 +507,7 @@ function SidebarContent({
           (SIDEBAR_SECTION_LINK_CLASS) because they stack directly against each other. */}
       <div className="shrink-0 px-1.5">
         <DashboardLink onNavigate={onNavigate} />
+        <Link to="/roadmap-queue" onClick={onNavigate} className="block rounded-md px-3 py-2 text-sm text-muted-foreground hover:bg-muted hover:text-foreground">Roadmap queue</Link>
       </div>
       {projectGroups ? (
         <>

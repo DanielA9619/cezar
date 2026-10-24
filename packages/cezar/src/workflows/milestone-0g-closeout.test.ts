@@ -78,13 +78,21 @@ if (slugifyTitle('  Hello   WORLD  ') !== 'hello-world') {
     expect(starts).not.toHaveBeenCalled();
   });
 
-  it('honors the project override and rejects autonomy or in-place work', () => {
+  it('honors the project override and allows autonomy with mandatory review in a worktree', () => {
     expect(reviewPreflightError(true, { reviewGate: false }, { worktree: true }, { CEZ_REVIEW_GATE: '1' })).toContain('disabled');
     expect(reviewPreflightError(true, { reviewGate: true }, { worktree: true }, { CEZ_REVIEW_GATE: '0' })).toBeUndefined();
-    expect(reviewPreflightError(true, { reviewGate: true }, { autonomous: true })).toContain('autonomous');
+    expect(reviewPreflightError(true, { reviewGate: true }, { autonomous: true, worktree: true })).toBeUndefined();
     expect(reviewPreflightError(true, { reviewGate: true }, { worktree: false })).toContain('worktree');
     expect(reviewPreflightError(true, { reviewGate: true, taskWorkspace: 'in-place' }, {})).toContain('worktree');
   });
+
+  it('keeps a verified autonomous workflow at manual review', async () => {
+    vi.stubEnv('CEZ_REVIEW_GATE', '1');
+    const run = manager.startRun(verified, { task: 'mock:repair-slug mock:done', worktree: true, autonomous: true });
+    const result = await settled(run.id);
+    expect(result.status).toBe('review');
+    expect(store.readEvents(run.id).filter((event) => event.type === 'check-output').map((event) => event.exitCode)).toEqual([1, 0]);
+  }, 60_000);
 
   it('fails on a real code defect, returns the output, repairs code, verifies, then reaches review', async () => {
     vi.stubEnv('CEZ_REVIEW_GATE', '1');

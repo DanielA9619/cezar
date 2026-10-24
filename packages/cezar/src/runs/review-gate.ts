@@ -10,8 +10,8 @@
  * `CEZ_REVIEW_GATE` env decides — enabled ONLY by the exact string `'1'` (anything
  * else, including `'true'`/`'yes'`/unset, is off); otherwise off.
  *
- * Autonomy is applied by the callers, not here: a run parks at `review` only when
- * `worktreeHasDiff && reviewGateEnabled(config) && !run.autonomous`.
+ * Autonomy is applied by the callers. A workflow's explicit `requiresReview`
+ * overrides the legacy autonomous bypass at settlement.
  */
 export function reviewGateEnabled(
   config: { reviewGate?: boolean },
@@ -31,7 +31,6 @@ export function reviewPreflightError(
 ): string | undefined {
   if (!requiresReview) return undefined;
   if (!reviewGateEnabled(config, env)) return 'workflow requires review, but the review gate is disabled (enable Settings → Tasks review gate or CEZ_REVIEW_GATE=1)';
-  if (input.autonomous) return 'workflow requires review, but autonomous mode skips the review gate';
   if (input.readOnly) return 'workflow requires review, but read-only tasks cannot produce a review diff';
   if (input.worktree === false || (input.worktree === undefined && config.taskWorkspace === 'in-place')) {
     return 'workflow requires review in an isolated worktree';
