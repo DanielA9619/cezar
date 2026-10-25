@@ -7,9 +7,9 @@ import { loadWorkspaceConfig } from '../workspace/config.ts';
 import { fetchGithub } from '../server/forge/github.ts';
 import { readRunIndexFromDisk } from '../runs/run-index.ts';
 import { githubIssuesFromForge, planRoadmap, roadmapInputSchema } from './planner.ts';
-import { queueAuthorizationSchema } from '@open-mercato/cezar-contract';
-import { ownerAuthorization, queuePreview, readQueueState, saveQueueInput } from './queue.ts';
+import { queuePreview, readQueueState, saveQueueInput } from './queue.ts';
 import { refreshQueueGithub } from './github-source.ts';
+import { dispatchOneMockTask } from './bridge.ts';
 
 /** Explicit CLI only. No timer, server route, RunManager call, or agent spawn. */
 export async function runRoadmapCommand(args: string[]): Promise<number> {
@@ -24,17 +24,14 @@ export async function runRoadmapCommand(args: string[]): Promise<number> {
         await saveQueueInput(roadmapInputSchema.parse(JSON.parse(raw)));
       } else if (command === 'refresh' && args.length === 2) {
         await refreshQueueGithub();
-      } else if (command === 'authorize' && inputPath) {
-        const raw = await readFile(resolve(inputPath), 'utf8');
-        const authorization = queueAuthorizationSchema.omit({ audit: true }).parse(JSON.parse(raw));
-        await ownerAuthorization(authorization, 'grant', process.stdin.isTTY === true && !process.env.CEZ_TASK_ID);
-      } else if (command === 'revoke' && args[2]) {
-        const old = (await readQueueState()).authorizations.find((entry) => entry.taskId === args[2]);
-        if (!old) throw new Error('Authorization does not exist');
-        const { audit: _audit, ...input } = old;
-        await ownerAuthorization(input, 'revoke', process.stdin.isTTY === true && !process.env.CEZ_TASK_ID);
+      } else if (command === 'dispatch' && args.length <= 3) {
+        const result = await dispatchOneMockTask(args[2]);
+        console.log(`Mock queue task ${result.taskId}: run ${result.runId} → ${result.status}`);
+        return result.status === 'review' ? 0 : 1;
+      } else if (command === 'authorize' || command === 'revoke') {
+        throw new Error('Owner authorization requires Windows Hello in the local Roadmap queue cockpit; CLI input cannot approve or revoke execution');
       } else if (command !== 'show' || args.length !== 2) {
-        throw new Error('Usage: cezar roadmap queue load --input <planning.json> | refresh | show | authorize --input <authorization.json> | revoke <task-id>');
+        throw new Error('Usage: cezar roadmap queue load --input <planning.json> | refresh | show | dispatch [task-id]');
       }
       const preview = queuePreview(await readQueueState());
       console.log(`Planning only — next: ${preview.nextTaskId ?? 'none'}; authorizations never start work`);

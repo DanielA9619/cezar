@@ -97,7 +97,7 @@ export function planRoadmap(input: RoadmapInput, now = new Date()): PlanningPrev
       priority: task.priority, approval: task.approval, status, score,
       reason: reasons.length ? reasons.join('; ') : `approved ${task.source} candidate; priority P${task.priority}; dependencies satisfied`,
       preferredRunner: task.preferredRunner, executionEligible: false as const,
-      proposedWorkflow: 'reliable-npm-task',
+      proposedWorkflow: 'queue-mock-verify',
     };
   });
   rows.sort((a, b) => {

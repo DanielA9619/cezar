@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { GithubData } from '../server/forge/github.ts';
 import { roadmapInputSchema } from './planner.ts';
 import { refreshQueueGithub, type GithubQueueSource } from './github-source.ts';
-import { ownerAuthorization, queuePreview, readQueueState, reservePlanningTask, saveQueueInput, setPriority, updateQueue } from './queue.ts';
+import { advanceExecutionClaim, claimExecution, ownerAuthorization, queuePreview, readQueueState, reservePlanningTask, saveQueueInput, setPriority, updateQueue } from './queue.ts';
 
 const issue = (repo: string, number: number, title = `Issue ${number}`) => ({ repo, number, title, url: `https://github.com/${repo}/issues/${number}`, state: 'open' as const, labels: ['roadmap-approved'] });
 const fixture = roadmapInputSchema.parse({
@@ -44,6 +44,20 @@ describe('persistent planning-only work queue', () => {
     expect(claims.filter(Boolean)).toHaveLength(1);
     expect(queuePreview(await readQueueState()).rows.find((row) => row.id === 'atlas-schema')?.status).toBe('active');
     expect(await reservePlanningTask('atlas-schema', 'late')).toBe(false);
+  });
+
+  it('fences competing durable execution claims and retains an abandoned claim across restart', async () => {
+    const claimed = await Promise.all(Array.from({ length: 4 }, (_, index) =>
+      claimExecution('fictional/atlas', 'atlas-schema', `worker-${index}`, () => true)));
+    const winner = claimed.find((entry) => entry !== undefined)!;
+    expect(claimed.filter(Boolean)).toHaveLength(1);
+    expect((await readQueueState()).executionClaims).toHaveLength(1);
+    expect(await advanceExecutionClaim({ ...winner, claimId: '00000000-0000-4000-8000-000000000001' }, { state: 'running' })).toBe(false);
+    expect(await advanceExecutionClaim(winner, { state: 'running', runId: 'mock-run' })).toBe(true);
+    expect(await claimExecution('fictional/atlas', 'atlas-schema', 'new-process', () => true)).toBeUndefined();
+    expect((await readQueueState()).executionClaims[0]).toMatchObject({ state: 'running', runId: 'mock-run', claimId: winner.claimId });
+    expect(await advanceExecutionClaim(winner, { state: 'uncertain', reason: 'cleanup not proved' })).toBe(true);
+    expect(await claimExecution('fictional/atlas', 'atlas-schema', 'after-expiry', () => true)).toBeUndefined();
   });
 
   it('requires owner channel, records edits and revocation, and expires independently of ranking', async () => {

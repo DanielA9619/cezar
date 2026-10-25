@@ -66,8 +66,7 @@ Usage:
   cezar roadmap queue load --input <file>      load an allowlisted planning queue
   cezar roadmap queue refresh                  refresh allowlisted GitHub issues only
   cezar roadmap queue show                     show the persisted planning queue
-  cezar roadmap queue authorize --input <file> record owner authorization (interactive terminal)
-  cezar roadmap queue revoke <task-id>         revoke owner authorization (interactive terminal)
+  cezar roadmap queue dispatch [task-id]       run one Windows Hello-approved mock task
   cezar init                scaffold .ai/cezar/ (example workflow + skill)
   cezar projects            list the projects this cockpit serves
                             (also: projects add [<dir>] · projects remove <id>)

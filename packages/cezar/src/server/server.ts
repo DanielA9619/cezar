@@ -52,8 +52,11 @@ import { homedir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Hono, type Context } from 'hono';
-import { queuePriorityInputSchema, queueResponseSchema } from '@open-mercato/cezar-contract';
+import { queuePriorityInputSchema, queueResponseSchema, queueOwnerGrantBeginSchema, queueOwnerRevokeBeginSchema, queueOwnerEnrollmentSchema, queueOwnerDecisionSchema } from '@open-mercato/cezar-contract';
 import { queuePreview, readQueueState, setPriority } from '../roadmap/queue.ts';
+import { beginOwnerEnrollment, finishOwnerEnrollment, beginOwnerGrant, beginOwnerRevocation, finishOwnerDecision } from '../roadmap/owner-auth.ts';
+import { queueDetailedPreview } from '../roadmap/bridge.ts';
+import type { AuthenticationResponseJSON, RegistrationResponseJSON } from '@simplewebauthn/server';
 import type { Next } from 'hono';
 import { serve, type ServerType } from '@hono/node-server';
 import { bodyLimit } from 'hono/body-limit';
@@ -7752,12 +7755,43 @@ export function createApp(deps: ServerDeps) {
   // project-scoped spelling, which would be a second surface to protect with no consumer.
   const roadmapQueueRoutes = new Hono()
     .get('/workspace/roadmap-queue', async (c) => {
-      try { return c.json(queueResponseSchema.parse(queuePreview(await readQueueState()))); }
+      try { return c.json(queueResponseSchema.parse(await queueDetailedPreview())); }
       catch { return c.json({ error: 'Roadmap queue is unavailable or unverified' }, 503); }
     })
     .patch('/workspace/roadmap-queue/priority', jsonZodValidator(queuePriorityInputSchema), async (c) => {
       const { taskId, priority } = c.req.valid('json');
       try { return c.json(queueResponseSchema.parse(await setPriority(taskId, priority))); }
+      catch (error) { return c.json({ error: error instanceof Error ? error.message : String(error) }, 409); }
+    })
+    .post('/workspace/roadmap-queue/owner/enroll/start', async (c) => {
+      if (!capabilities().localHandoff) return c.json({ error: 'Windows Hello approval requires a local cockpit' }, 403);
+      try { return c.json(await beginOwnerEnrollment(new URL(c.req.url).origin)); }
+      catch (error) { return c.json({ error: error instanceof Error ? error.message : String(error) }, 409); }
+    })
+    .post('/workspace/roadmap-queue/owner/enroll/finish', jsonZodValidator(queueOwnerEnrollmentSchema), async (c) => {
+      if (!capabilities().localHandoff) return c.json({ error: 'Windows Hello approval requires a local cockpit' }, 403);
+      try { await finishOwnerEnrollment(new URL(c.req.url).origin, c.req.valid('json').response as RegistrationResponseJSON); return c.json({ enrolled: true as const }); }
+      catch (error) { return c.json({ error: error instanceof Error ? error.message : String(error) }, 409); }
+    })
+    .post('/workspace/roadmap-queue/owner/grant/start', jsonZodValidator(queueOwnerGrantBeginSchema), async (c) => {
+      if (!capabilities().localHandoff) return c.json({ error: 'Windows Hello approval requires a local cockpit' }, 403);
+      try { return c.json(await beginOwnerGrant(new URL(c.req.url).origin, c.req.valid('json').grant)); }
+      catch (error) { return c.json({ error: error instanceof Error ? error.message : String(error) }, 409); }
+    })
+    .post('/workspace/roadmap-queue/owner/grant/finish', jsonZodValidator(queueOwnerDecisionSchema), async (c) => {
+      if (!capabilities().localHandoff) return c.json({ error: 'Windows Hello approval requires a local cockpit' }, 403);
+      try { return c.json(await finishOwnerDecision(new URL(c.req.url).origin, 'grant', c.req.valid('json').response as AuthenticationResponseJSON)); }
+      catch (error) { return c.json({ error: error instanceof Error ? error.message : String(error) }, 409); }
+    })
+    .post('/workspace/roadmap-queue/owner/revoke/start', jsonZodValidator(queueOwnerRevokeBeginSchema), async (c) => {
+      if (!capabilities().localHandoff) return c.json({ error: 'Windows Hello approval requires a local cockpit' }, 403);
+      const { repo, taskId } = c.req.valid('json');
+      try { return c.json(await beginOwnerRevocation(new URL(c.req.url).origin, repo, taskId)); }
+      catch (error) { return c.json({ error: error instanceof Error ? error.message : String(error) }, 409); }
+    })
+    .post('/workspace/roadmap-queue/owner/revoke/finish', jsonZodValidator(queueOwnerDecisionSchema), async (c) => {
+      if (!capabilities().localHandoff) return c.json({ error: 'Windows Hello approval requires a local cockpit' }, 403);
+      try { return c.json(await finishOwnerDecision(new URL(c.req.url).origin, 'revoke', c.req.valid('json').response as AuthenticationResponseJSON)); }
       catch (error) { return c.json({ error: error instanceof Error ? error.message : String(error) }, 409); }
     });
 

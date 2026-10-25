@@ -147,6 +147,8 @@ export type RunPrRef = z.infer<typeof prRefSchema>;
  *  parse `runs.json` — see `reconcileLoadedRun` for why a second parser is a correctness risk. */
 export const runRecordSchema = z.object({
   agentCleanup: z.enum(['pending', 'confirmed', 'uncertain']).optional(),
+  /** Milestone 1C queue provenance. A missing runtime guard stops recovery; never infer one from task text. */
+  queueExecution: z.object({ repo: z.string(), taskId: z.string(), claimId: z.string().uuid(), generation: z.number().int().positive(), mockOnly: z.literal(true) }).optional(),
   id: z.string(),
   title: z.string(),
   /** Display title (#389): the auto-derived summary of the first agent turn,

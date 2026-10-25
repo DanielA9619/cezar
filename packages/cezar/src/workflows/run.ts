@@ -25,7 +25,8 @@ import {
 } from '../core/private-mcp.ts';
 import { onUsage, registerRunProcess, unregisterRunProcess, type ProcessUsage } from '../core/process-usage.ts';
 import { parseUsageLimit } from '../core/usage-limit.ts';
-import { createRunner } from '../core/runner-factory.ts';
+import { createMockQueueRunner, createRunner } from '../core/runner-factory.ts';
+import { queueMockWorkflow } from '../roadmap/mock-workflow.ts';
 import type { RunnerId } from '../core/agent-runner.ts';
 import { modelConflictsWithRunner } from '../core/model-presets.ts';
 import { AGENT_MODELS_LOCKED_ERROR, agentModelsLocked } from '../core/agent-model-policy.ts';
@@ -766,6 +767,8 @@ function formatWakeInstant(at: Date): string {
 }
 
 export interface StartRunInput {
+  /** Internal queue bridge provenance. The engine enforces its mock-only boundary at every spawn. */
+  queueExecution?: NonNullable<RunRecord['queueExecution']>;
   task: string;
   /** The cockpit device that started this task (telemetry only, `x-cezar-sid`). */
   deviceSid?: string;
@@ -1264,6 +1267,19 @@ export class RunManager {
 
   /** See the constructor option of the same name. */
   private readonly resolveTrackerEnv: ((root: string, expected: TrackerAssociation | undefined) => Promise<Record<string, string>>) | undefined;
+  private readonly queueGuard: ((run: RunRecord) => Promise<string | undefined>) | undefined;
+
+  private async queuePermit(runId: string): Promise<string | undefined> {
+    const run = this.store.getRun(runId);
+    if (!run?.queueExecution) return undefined;
+    if (!this.queueGuard) return 'Queue execution cannot resume without its authorization and lease guard';
+    try { return await this.queueGuard(run); }
+    catch { return 'Queue authorization or execution lease could not be verified'; }
+  }
+
+  private runnerFor(runId: string, backend: RunnerId) {
+    return this.store.getRun(runId)?.queueExecution ? createMockQueueRunner(backend) : createRunner(backend);
+  }
 
   constructor(
     private readonly store: RunStore,
@@ -1277,6 +1293,7 @@ export class RunManager {
        * reach an agent. Secrets are registered with RunStore before any output arrives.
        */
       resolveTrackerEnv?: (root: string, expected: TrackerAssociation | undefined) => Promise<Record<string, string>>;
+      queueGuard?: (run: RunRecord) => Promise<string | undefined>;
       /** The project/workspace secret store (spec 2026-10-10-project-secrets-vault-options);
        *  check steps read it with the `checks` audience. */
       secrets?: SecretStore;
@@ -1289,6 +1306,7 @@ export class RunManager {
     this.branchNameWaitMs = options.branchNameWaitMs ?? BRANCH_NAME_WAIT_MS;
     this.projectId = options.projectId;
     this.resolveTrackerEnv = options.resolveTrackerEnv;
+    this.queueGuard = options.queueGuard;
     this.secrets = options.secrets ?? new SecretStore();
     this.semaphore = options.semaphore ?? new WorkspaceSemaphore();
     this.offSemaphore = this.semaphore.register({
@@ -1506,6 +1524,7 @@ export class RunManager {
     options: { generateFollowups?: boolean; recordedProfileId?: string } = {},
   ): Promise<{ env: Record<string, string>; profileId: string }> {
     const run = this.store.getRun(runId);
+    if (run?.queueExecution) return { env: { CEZ_QUEUE_MOCK: '1' }, profileId: 'queue-mock' };
     const profileId = options.recordedProfileId
       ?? (backend === (run?.runner ?? 'claude') ? run?.agentProfile : undefined);
     const resolved = await resolveProfileEnvForRoot(this.repoRoot, backend, profileId);
@@ -1598,6 +1617,10 @@ export class RunManager {
     // restart would be a tree with no root.
     if (input.dispatch) this.store.updateRun(run.id, { dispatch: input.dispatch });
     else if (input.dispatchIntent) this.store.updateRun(run.id, { dispatch: { rootRunId: run.id, intent: input.dispatchIntent } });
+    if (input.queueExecution) {
+      this.store.updateRun(run.id, { queueExecution: input.queueExecution });
+      this.store.flush({ throwOnError: true });
+    }
     // Initial pasted attachments must be visible while the run is still queued (#612),
     // and must survive a restart before a slot opens. Persist them before the job
     // enters `pendingJobs`; `hydrateQueuedInput` reconstructs their content blocks
@@ -4544,7 +4567,9 @@ export class RunManager {
     }
     this.store.updateStep(runId, stepId, { profileId: continueProfile.profileId });
 
-    const runner = createRunner(continueBackend);
+    const queueError = await this.queuePermit(runId);
+    if (queueError) { failBeforeSpawn(queueError); return; }
+    const runner = this.runnerFor(runId, continueBackend);
     const continueMcp = await this.privateMcpForLaunch(continueBackend, onEvent);
     if (state.cancelled) return;
     state.currentStepId = stepId;
@@ -4756,6 +4781,14 @@ export class RunManager {
       this.store.appendEvent(runId, event);
     };
 
+    const queueError = await this.queuePermit(runId);
+    if (queueError) {
+      this.store.updateRun(runId, { status: 'failed', error: queueError, finishedAt: new Date().toISOString() });
+      emit({ type: 'lifecycle', message: `queue execution refused — ${queueError}` });
+      this.dropActive(runId, state);
+      return;
+    }
+
     // Resolve the agent backend for this run: the task choice (GUI) wins over
     // the config default. Per-step `runner` can still override it below.
     const config = await loadConfig(this.repoRoot);
@@ -4787,7 +4820,7 @@ export class RunManager {
       this.store.updateRun(runId, { worktree: false });
     }
     state.readOnly = input.readOnly === true && input.worktree === false;
-    state.autoLand = await this.landingPolicy(this.store.getRun(runId), config, (message) =>
+    state.autoLand = this.store.getRun(runId)?.queueExecution ? undefined : await this.landingPolicy(this.store.getRun(runId), config, (message) =>
       this.store.appendEvent(runId, { type: 'note', message }),
     );
     // Extra system prompt (R2 2.3): POST override > config default; echoed on
@@ -6622,7 +6655,9 @@ export class RunManager {
     }
     this.store.updateStep(runId, step.id, { profileId: stepProfile.profileId });
 
-    const runner = createRunner(stepBackend);
+    const queueError = await this.queuePermit(runId);
+    if (queueError) return queueError;
+    const runner = this.runnerFor(runId, stepBackend);
     const stepMcp = await this.privateMcpForLaunch(stepBackend, onEvent);
     let session: AgentSession;
     state.currentStepId = step.id;
@@ -7931,6 +7966,10 @@ export class RunManager {
     step: WorkflowStepDef,
     emit: (event: { type: string; stepId?: string; [k: string]: unknown }) => void,
   ): Promise<NodeJS.ProcessEnv> {
+    if (this.store.getRun(runId)?.queueExecution) {
+      const keep = ['SystemRoot', 'ComSpec', 'PATH', 'TEMP', 'TMP', 'WINDIR'];
+      return Object.fromEntries(keep.filter((name) => process.env[name] !== undefined).map((name) => [name, process.env[name]]));
+    }
     // A fork's head is untrusted code (Phase 3): like GitHub Actions withholding secrets from fork
     // PRs, its checks get the server env only — the credentials are neither read nor handed over.
     const untrusted = this.store.getRun(runId)?.untrustedHead === true;
@@ -8045,7 +8084,16 @@ export class RunManager {
     step: WorkflowStepDef,
     emit: (event: { type: string; stepId?: string; [k: string]: unknown }) => void,
   ): Promise<{ ok: boolean; output: string; exitCode: number }> {
+    const queueError = await this.queuePermit(runId);
+    if (queueError) return { ok: false, output: queueError, exitCode: -1 };
     const command = step.command as string;
+    const queueRun = this.store.getRun(runId);
+    if (queueRun?.queueExecution) {
+      const attempts = queueRun.workflowDef?.steps.find((candidate) => candidate.id === 'verify')?.onFail?.max;
+      const approvedAttempts = typeof attempts === 'number' ? attempts + 1 : 1;
+      const fixed = queueMockWorkflow(queueRun.runner === 'codex' ? 'codex' : 'claude', approvedAttempts).steps[1]?.command;
+      if (step.id !== 'verify' || command !== fixed) return { ok: false, output: 'Queue verification command is not the bundled mock verifier', exitCode: -1 };
+    }
     emit({ type: 'note', stepId: step.id, message: `$ ${command}` });
     const env = await this.checkStepEnv(runId, state, step, emit);
     // A cancel that landed during the read had no child to interrupt; do not spawn one now.

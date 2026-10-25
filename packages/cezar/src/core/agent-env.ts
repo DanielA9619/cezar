@@ -324,6 +324,10 @@ export interface BuildChildEnvOptions {
 export function buildChildEnv(opts: BuildChildEnvOptions): NodeJS.ProcessEnv {
   const source = opts.source ?? process.env;
   const extra = opts.extraEnv ?? {};
+  if (extra.CEZ_QUEUE_MOCK === '1') {
+    const names = ['SystemRoot', 'ComSpec', 'PATH', 'TEMP', 'TMP', 'WINDIR'];
+    return { ...Object.fromEntries(names.filter((name) => source[name] !== undefined).map((name) => [name, source[name]])), CEZ_QUEUE_MOCK: '1' };
+  }
 
   // Names `extra` is about to define, normalized. The host copy of a var the
   // per-run env overrides must be DROPPED, not merely shadowed: env names are

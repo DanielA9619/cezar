@@ -11,18 +11,38 @@ import { planRoadmap, roadmapInputSchema, type RoadmapInput } from './planner.ts
 const sourceSchema = z.object({ verifiedAt: z.string().datetime().optional(), complete: z.boolean(), reason: z.string().optional() });
 const reservationSchema = z.object({ taskId: z.string(), owner: z.string(), expiresAt: z.string().datetime() });
 const decisionSchema = z.object({ at: z.string().datetime(), nextTaskId: z.string().nullable(), reason: z.string(), considered: z.number().int().nonnegative() });
+const executionClaimSchema = z.object({
+  taskId: z.string().min(1), repo: z.string().min(1), claimId: z.string().uuid(),
+  owner: z.string().min(1), generation: z.number().int().positive(),
+  claimedAt: z.string().datetime(), heartbeatAt: z.string().datetime(),
+  state: z.enum(['claimed', 'running', 'review', 'failed', 'uncertain']),
+  runId: z.string().optional(), reason: z.string().optional(),
+});
+export type ExecutionClaim = z.infer<typeof executionClaimSchema>;
+const ownerAuthenticatorSchema = z.object({
+  id: z.string().min(1), publicKey: z.string().min(1), counter: z.number().int().nonnegative(),
+  transports: z.array(z.string()).optional(), enrolledAt: z.string().datetime(),
+});
+const pendingOwnerChallengeSchema = z.object({
+  kind: z.enum(['enroll', 'grant', 'revoke']), challenge: z.string().min(1),
+  origin: z.string().url(), rpId: z.string().min(1), expiresAt: z.string().datetime(),
+  grant: queueAuthorizationSchema.omit({ audit: true }).optional(),
+});
 export const queueStateSchema = z.object({
   version: z.literal(1), input: roadmapInputSchema,
   sources: z.record(z.string(), sourceSchema).default({}),
   priorityOverrides: z.record(z.string(), z.number().int().min(1).max(5)).default({}),
   authorizations: z.array(queueAuthorizationSchema).default([]),
+  ownerAuthenticator: ownerAuthenticatorSchema.optional(),
+  pendingOwnerChallenge: pendingOwnerChallengeSchema.optional(),
   reservations: z.array(reservationSchema).default([]),
+  executionClaims: z.array(executionClaimSchema).default([]),
   decisions: z.array(decisionSchema).default([]),
   updatedAt: z.string().datetime(),
 });
 export type QueueState = z.infer<typeof queueStateSchema>;
 const emptyInput = roadmapInputSchema.parse({ allowedRepositories: [] });
-const emptyState = (): QueueState => ({ version: 1, input: emptyInput, sources: {}, priorityOverrides: {}, authorizations: [], reservations: [], decisions: [], updatedAt: new Date(0).toISOString() });
+const emptyState = (): QueueState => ({ version: 1, input: emptyInput, sources: {}, priorityOverrides: {}, authorizations: [], reservations: [], executionClaims: [], decisions: [], updatedAt: new Date(0).toISOString() });
 const taskKey = (id: string) => id.toLowerCase();
 const repoKey = (repo: string) => repo.toLowerCase();
 const FRESH_MS = 15 * 60_000;
@@ -89,6 +109,7 @@ export function queuePreview(state: QueueState, now = new Date()): QueueResponse
     const reserved = state.reservations.some((entry) => taskKey(entry.taskId) === taskKey(row.id) && Date.parse(entry.expiresAt) > now.getTime());
     const priority = state.priorityOverrides[taskKey(row.id)] ?? row.priority;
     const auth = state.authorizations.find((entry) => taskKey(entry.taskId) === taskKey(row.id) && repoKey(entry.repo) === repoKey(row.repo));
+    const claim = state.executionClaims.find((entry) => taskKey(entry.taskId) === taskKey(row.id) && repoKey(entry.repo) === repoKey(row.repo));
     const status = stale ? 'stale' as const : reserved || state.input.runningTaskIds.some((id) => taskKey(id) === taskKey(row.id)) ? 'active' as const
       : row.reason.includes('already completed') ? 'completed' as const : row.status === 'ready' ? 'ready' as const : 'blocked' as const;
     const score = (6 - priority) * 100 + (row.source === 'roadmap' ? 10 : 0);
@@ -97,12 +118,16 @@ export function queuePreview(state: QueueState, now = new Date()): QueueResponse
       priority, dependencies: task?.dependencies ?? [], blockers: task?.blockers ?? [], status,
       score, reason: `${stale ? `GitHub state unverified: ${source?.reason ?? 'refresh required'}` : reserved ? 'reserved by another planner' : row.reason}${state.priorityOverrides[taskKey(row.id)] === undefined ? '' : `; owner priority override P${priority}`}`,
       proposedAgent: row.preferredRunner, proposedWorkflow: row.proposedWorkflow,
-      authorization: authorizationStatus(auth, now), lastRefresh: source?.verifiedAt, executionEligible: false as const,
+      authorization: authorizationStatus(auth, now), lastRefresh: source?.verifiedAt, executionEligible: false,
+      executionReasons: ['Execution checks have not run'], attemptsUsed: 0,
+      ...(auth ? { maxAttempts: auth.maxAttempts } : {}), ...(claim ? { leaseOwner: claim.owner, executionStatus: claim.state } : {}),
+      reviewRequired: auth?.requireReview === true,
     };
   });
   const order = { ready: 0, blocked: 1, active: 2, stale: 3, completed: 4 };
   rows.sort((a, b) => order[a.status] - order[b.status] || b.score - a.score || a.id.localeCompare(b.id));
-  return queueResponseSchema.parse({ mode: 'planning-only', updatedAt: state.updatedAt, rows, nextTaskId: rows.find((row) => row.status === 'ready')?.id ?? null, authorizations: state.authorizations });
+  return queueResponseSchema.parse({ mode: 'planning-only', updatedAt: state.updatedAt, rows, nextTaskId: rows.find((row) => row.status === 'ready')?.id ?? null, authorizations: state.authorizations, ownerEnrolled: !!state.ownerAuthenticator,
+    recentDecisions: state.decisions.slice(-10).map((entry) => ({ at: entry.at, reason: entry.reason })) });
 }
 
 export async function setPriority(taskId: string, priority: number): Promise<QueueResponse> {
@@ -123,6 +148,46 @@ export async function reservePlanningTask(taskId: string, owner: string, now = n
     reserved = true;
   });
   return reserved;
+}
+
+/** Claims are never stolen on heartbeat expiry: a missing heartbeat proves no process cleanup. */
+export async function claimExecution(
+  repo: string, taskId: string, owner: string,
+  eligible: (state: QueueState) => boolean,
+): Promise<ExecutionClaim | undefined> {
+  let claimed: ExecutionClaim | undefined;
+  await updateQueue((state) => {
+    if (!eligible(state)) return;
+    const previous = state.executionClaims.find((entry) => repoKey(entry.repo) === repoKey(repo) && taskKey(entry.taskId) === taskKey(taskId));
+    if (previous) return;
+    const now = new Date().toISOString();
+    claimed = executionClaimSchema.parse({ repo, taskId, owner, claimId: randomUUID(),
+      generation: 1, claimedAt: now, heartbeatAt: now, state: 'claimed' });
+    state.executionClaims = state.executionClaims.filter((entry) => !(repoKey(entry.repo) === repoKey(repo) && taskKey(entry.taskId) === taskKey(taskId)));
+    state.executionClaims.push(claimed);
+  });
+  return claimed;
+}
+
+/** Every worker update carries its fencing token; a stale worker cannot advance its claim. */
+export async function advanceExecutionClaim(
+  claim: Pick<ExecutionClaim, 'repo' | 'taskId' | 'claimId' | 'generation'>,
+  update: Pick<ExecutionClaim, 'state'> & Partial<Pick<ExecutionClaim, 'runId' | 'reason'>>,
+): Promise<boolean> {
+  let advanced = false;
+  await updateQueue((state) => {
+    const current = state.executionClaims.find((entry) => repoKey(entry.repo) === repoKey(claim.repo) && taskKey(entry.taskId) === taskKey(claim.taskId));
+    if (!current || current.claimId !== claim.claimId || current.generation !== claim.generation) return;
+    if (['review', 'failed', 'uncertain'].includes(current.state)) return;
+    if (current.state === 'claimed' && !['claimed', 'running', 'failed', 'uncertain'].includes(update.state)) return;
+    if (current.state === 'running' && !['running', 'review', 'failed', 'uncertain'].includes(update.state)) return;
+    current.state = update.state;
+    current.heartbeatAt = new Date().toISOString();
+    if (update.runId !== undefined) current.runId = update.runId;
+    if (update.reason !== undefined) current.reason = update.reason.slice(0, 300);
+    advanced = true;
+  });
+  return advanced;
 }
 
 export async function ownerAuthorization(input: Omit<QueueAuthorization, 'audit'>, action: 'grant' | 'revoke', ownerVerified: boolean): Promise<QueueAuthorization> {
