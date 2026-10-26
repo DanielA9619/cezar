@@ -108,6 +108,7 @@ export function RoadmapQueueRoute() {
         <p className="font-medium">Confirm this exact approval</p>
         <p>{pendingGrant.grant.repo} · {pendingGrant.grant.taskId} · revision {pendingGrant.grant.taskRevision} · {pendingGrant.grant.agent}/{pendingGrant.grant.workflow}</p>
         <p>Repository: {pendingGrant.grant.repositoryRoot}. Scope: {pendingGrant.grant.scope}. Verify: {pendingGrant.grant.verificationCommand}. Expires: {new Date(pendingGrant.grant.expiresAt).toLocaleString()}. Maximum attempts: {pendingGrant.grant.maxAttempts}. Human review required.</p>
+        {pendingGrant.grant.githubSnapshot && <p>GitHub issue #{pendingGrant.grant.githubSnapshot.issueNumber}: repository ID {pendingGrant.grant.githubSnapshot.repositoryId}, issue ID {pendingGrant.grant.githubSnapshot.issueId}, updated {pendingGrant.grant.githubSnapshot.updatedAt}, snapshot SHA-256 {pendingGrant.grant.githubSnapshot.digest}. This issue is checked again before execution.</p>}
         <button type="button" disabled={busy} onClick={() => void finishGrant()} className="rounded border px-3 py-1">Verify with Windows Hello</button>
         <button type="button" onClick={() => setPendingGrant(null)} className="ml-2 rounded border px-3 py-1">Cancel</button>
       </div>}

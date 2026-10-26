@@ -12,6 +12,7 @@ import { RunManager } from '../workflows/run.ts';
 import { queueMockWorkflow, queueMockWorkflowRevision } from './mock-workflow.ts';
 import { advanceExecutionClaim, claimExecution, queuePreview, readQueueState, type ExecutionClaim, type QueueState } from './queue.ts';
 import { queueResponseSchema, type QueueResponse } from '@open-mercato/cezar-contract';
+import { freshGithubSnapshot, readGithubIssue, sameGithubSnapshot, type GithubIssueReader } from './github-issue-verifier.ts';
 
 function same(a: string, b: string): boolean { return a.toLowerCase() === b.toLowerCase(); }
 function inside(root: string, target: string): boolean {
@@ -29,7 +30,8 @@ async function taskContext(state: QueueState, repo: string, taskId: string) {
 }
 
 /** These checks are repeated before launch and at every RunManager spawn. */
-export async function queueExecutionReasons(state: QueueState, repo: string, taskId: string, ownClaim?: ExecutionClaim): Promise<string[]> {
+export async function queueExecutionReasons(state: QueueState, repo: string, taskId: string, ownClaim?: ExecutionClaim,
+  issueReader: GithubIssueReader = readGithubIssue, githubMode: 'verify' | 'defer' | 'skip' = 'verify'): Promise<string[]> {
   const reasons: string[] = [];
   if (process.platform !== 'win32') reasons.push('Windows mock bridge is required');
   if (!process.env.CEZ_HOME) reasons.push('An isolated CEZ_HOME is required');
@@ -39,7 +41,19 @@ export async function queueExecutionReasons(state: QueueState, repo: string, tas
   const { allowed, project, roadmap, root } = await taskContext(state, repo, taskId);
   if (!allowed?.projectId || !project || !root) reasons.push('Repository is not explicitly allowlisted to a readable registered project');
   if (!roadmap) reasons.push('No immutable local roadmap task identity');
-  if (roadmap?.githubIssue !== undefined || row?.source === 'github') reasons.push('GitHub issue revision verification is not available in the mock bridge');
+  if (row?.source === 'github' && !roadmap) reasons.push('Discovered GitHub issue needs a linked local roadmap task before authorization');
+  if (roadmap?.githubIssue !== undefined) {
+    if (!auth?.githubSnapshot || auth.githubSnapshot.issueNumber !== roadmap.githubIssue) reasons.push('Approval lacks the linked GitHub issue snapshot');
+    else if (githubMode === 'defer') reasons.push('Direct GitHub issue verification is required at dispatch');
+    else if (githubMode === 'verify' && root) {
+      try {
+        const evidence = await issueReader(root, repo, roadmap.githubIssue);
+        if (!freshGithubSnapshot(evidence.snapshot) || evidence.snapshot.issueNumber !== roadmap.githubIssue) reasons.push('Direct GitHub issue evidence is stale or mismatched');
+        if (evidence.state !== 'open' || !evidence.labels.includes('roadmap-approved')) reasons.push('GitHub issue closed or lost planning approval');
+        if (!sameGithubSnapshot(auth.githubSnapshot, evidence.snapshot)) reasons.push('GitHub issue identity or revision changed after approval');
+      } catch (error) { reasons.push(error instanceof Error ? error.message : 'Direct GitHub verification failed'); }
+    }
+  } else if (auth?.githubSnapshot) reasons.push('Approval refers to a GitHub issue, but task is now local-only');
   if (root) {
     const sandbox = await realpath(join(cezarHomeDir(), 'roadmap', 'disposable')).catch(() => undefined);
     if (!sandbox || !inside(sandbox, root) || !existsSync(join(root, '.cezar-disposable'))) reasons.push('Project is not inside the marked disposable CEZ_HOME sandbox');
@@ -71,7 +85,7 @@ export async function queueDetailedPreview(): Promise<QueueResponse> {
   const state = await readQueueState();
   const preview = queuePreview(state);
   const rows = await Promise.all(preview.rows.map(async (row) => {
-    const reasons = await queueExecutionReasons(state, row.repo, row.id).catch(() => ['Execution checks could not be completed']);
+    const reasons = await queueExecutionReasons(state, row.repo, row.id, undefined, readGithubIssue, 'defer').catch(() => ['Execution checks could not be completed']);
     const claim = state.executionClaims.find((entry) => same(entry.repo, row.repo) && same(entry.taskId, row.id));
     let attemptsUsed = 0;
     let verificationProgress: string | undefined;
@@ -92,12 +106,12 @@ export async function queueDetailedPreview(): Promise<QueueResponse> {
   });
 }
 
-export async function dispatchOneMockTask(taskId?: string): Promise<{ taskId: string; runId: string; status: string }> {
+export async function dispatchOneMockTask(taskId?: string, issueReader: GithubIssueReader = readGithubIssue): Promise<{ taskId: string; runId: string; status: string }> {
   const snapshot = await readQueueState();
   const candidates = queuePreview(snapshot).rows.filter((row) => row.status === 'ready' && (!taskId || same(row.id, taskId)));
   let chosen: typeof candidates[number] | undefined;
-  for (const row of candidates) if ((await queueExecutionReasons(snapshot, row.repo, row.id)).length === 0) { chosen = row; break; }
-  if (!chosen) throw new Error(taskId ? `Task ${taskId} is not eligible: ${candidates.length ? (await queueExecutionReasons(snapshot, candidates[0]!.repo, candidates[0]!.id)).join('; ') : 'no ready match'}` : 'No authorized mock task is eligible');
+  for (const row of candidates) if ((await queueExecutionReasons(snapshot, row.repo, row.id, undefined, issueReader)).length === 0) { chosen = row; break; }
+  if (!chosen) throw new Error(taskId ? `Task ${taskId} is not eligible: ${candidates.length ? (await queueExecutionReasons(snapshot, candidates[0]!.repo, candidates[0]!.id, undefined, issueReader)).join('; ') : 'no ready match'}` : 'No authorized mock task is eligible');
   const repo = chosen.repo; const id = chosen.id;
   const context = await taskContext(snapshot, repo, id);
   const root = context.root!;
@@ -110,21 +124,21 @@ export async function dispatchOneMockTask(taskId?: string): Promise<{ taskId: st
     return !!currentAuth && currentAuth.approvedAt === auth.approvedAt && currentAuth.credentialId === auth.credentialId && !currentAuth.revokedAt && Date.parse(currentAuth.expiresAt) > Date.now() && currentRow?.status === 'ready';
   });
   if (!claim) throw new Error('Another Cezar instance claimed or changed this task');
-  const guard = async (run: RunRecord): Promise<string | undefined> => {
+  const guard = async (run: RunRecord, githubMode: 'verify' | 'skip' = 'verify'): Promise<string | undefined> => {
     if (run.queueExecution?.claimId !== claim.claimId || run.queueExecution.generation !== claim.generation || run.queueExecution.mockOnly !== true) return 'Queue run provenance does not match its claim';
     if (run.workflow !== workflow.name || run.runner !== auth.agent || run.worktree === false) return 'Queue run execution parameters changed';
     if (JSON.stringify(run.workflowDef) !== JSON.stringify(workflow)) return 'Queue workflow definition differs from the approved fixed mock workflow';
     const current = await readQueueState();
     const currentAuth = current.authorizations.find((entry) => same(entry.repo, repo) && same(entry.taskId, id));
     if (currentAuth?.approvedAt !== auth.approvedAt || currentAuth?.credentialId !== auth.credentialId) return 'Owner grant changed after this execution was claimed';
-    const reasons = await queueExecutionReasons(current, repo, id, claim);
+    const reasons = await queueExecutionReasons(current, repo, id, claim, issueReader, githubMode);
     return reasons[0];
   };
   let store: RunStore | undefined;
   let manager: RunManager | undefined;
   let timer: ReturnType<typeof setInterval> | undefined;
   try {
-    const reasons = await queueExecutionReasons(await readQueueState(), repo, id, claim);
+    const reasons = await queueExecutionReasons(await readQueueState(), repo, id, claim, issueReader);
     if (reasons.length) throw new Error(reasons.join('; '));
     store = RunStore.open(join(root, '.ai', 'cezar'));
     manager = new RunManager(store, root, { queueGuard: guard });
@@ -133,7 +147,7 @@ export async function dispatchOneMockTask(taskId?: string): Promise<{ taskId: st
       queueExecution: { repo, taskId: id, claimId: claim.claimId, generation: claim.generation, mockOnly: true } });
     if (!await advanceExecutionClaim(claim, { state: 'running', runId: run.id })) throw new Error('Execution claim was lost before launch');
     timer = setInterval(() => { void (async () => {
-      const reason = await guard(store!.getRun(run.id)!);
+      const reason = await guard(store!.getRun(run.id)!, 'skip');
       if (reason || !await advanceExecutionClaim(claim, { state: 'running', runId: run.id })) manager?.cancel(run.id);
     })().catch(() => manager?.cancel(run.id)); }, 5_000);
     const final = await new Promise<RunRecord>((finish) => {

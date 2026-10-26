@@ -14,11 +14,14 @@ export const queueAuthorizationSchema = z.object({
   /** Absent on pre-1C planning records. Such records can never authorize execution. */
   repositoryRoot: z.string().min(1).optional(), taskRevision: z.string().min(1).optional(), workflowRevision: z.string().min(1).optional(),
   credentialId: z.string().min(1).optional(), approvedAt: z.string().datetime().optional(),
+  githubSnapshot: z.object({ repositoryId: z.number().int().positive(), repositoryNodeId: z.string().min(1),
+    issueId: z.number().int().positive(), issueNodeId: z.string().min(1), issueNumber: z.number().int().positive(),
+    updatedAt: z.string().datetime(), digest: z.string().regex(/^[0-9a-f]{64}$/), verifiedAt: z.string().datetime() }).optional(),
   audit: z.array(z.object({ at: z.string().datetime(), action: z.enum(['created', 'modified', 'revoked']), actor: z.enum(['owner-cli', 'windows-hello']) })),
 });
 export type QueueAuthorization = z.infer<typeof queueAuthorizationSchema>;
 
-export const queueAuthorizationRequestSchema = queueAuthorizationSchema.omit({ audit: true, revokedAt: true, credentialId: true, approvedAt: true, repositoryRoot: true, taskRevision: true, workflowRevision: true });
+export const queueAuthorizationRequestSchema = queueAuthorizationSchema.omit({ audit: true, revokedAt: true, credentialId: true, approvedAt: true, repositoryRoot: true, taskRevision: true, workflowRevision: true, githubSnapshot: true });
 export const queueOwnerGrantBeginSchema = z.object({ grant: queueAuthorizationRequestSchema });
 export const queueOwnerRevokeBeginSchema = z.object({ repo: z.string().min(1), taskId: z.string().min(1) });
 export const queueOwnerRegistrationResponseSchema = z.object({

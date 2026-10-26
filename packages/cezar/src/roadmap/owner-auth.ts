@@ -9,6 +9,7 @@ import { loadWorkspaceConfig } from '../workspace/config.ts';
 import { queuePreview, readQueueState, updateQueue, type QueueState } from './queue.ts';
 import { queueMockWorkflowRevision } from './mock-workflow.ts';
 import { cezarHomeDir } from '../paths.ts';
+import { freshGithubSnapshot, readGithubIssue, type GithubIssueReader } from './github-issue-verifier.ts';
 
 const CHALLENGE_MS = 2 * 60_000;
 const rpName = 'Cezar local owner approval';
@@ -25,7 +26,10 @@ function grantDigest(grant: Omit<QueueAuthorization, 'audit'>): Buffer {
   // Explicit field order is the approval protocol; no caller-supplied extra keys are signed.
   const value = [grant.repo, grant.repositoryRoot, grant.taskId, grant.taskRevision, grant.scope,
     grant.workflowRevision,
-    grant.agent, grant.workflow, grant.expiresAt, grant.maxAttempts, grant.requireReview, grant.verificationCommand];
+    grant.agent, grant.workflow, grant.expiresAt, grant.maxAttempts, grant.requireReview, grant.verificationCommand,
+    grant.githubSnapshot && { repositoryId: grant.githubSnapshot.repositoryId, repositoryNodeId: grant.githubSnapshot.repositoryNodeId,
+      issueId: grant.githubSnapshot.issueId, issueNodeId: grant.githubSnapshot.issueNodeId,
+      issueNumber: grant.githubSnapshot.issueNumber, updatedAt: grant.githubSnapshot.updatedAt, digest: grant.githubSnapshot.digest }];
   return createHash('sha256').update(JSON.stringify(value)).digest();
 }
 
@@ -38,7 +42,7 @@ function assertGrantChallenge(challenge: string, grant: Omit<QueueAuthorization,
   if (raw.length !== 64 || !timingSafeEqual(raw.subarray(32), grantDigest(grant))) throw new Error('Approval challenge no longer matches its exact scope');
 }
 
-async function prepareGrant(input: unknown): Promise<Omit<QueueAuthorization, 'audit'>> {
+async function prepareGrant(input: unknown, issueReader: GithubIssueReader): Promise<Omit<QueueAuthorization, 'audit'>> {
   const request = queueAuthorizationRequestSchema.parse(input);
   const state = await readQueueState();
   const allowed = state.input.allowedRepositories.find((entry) => entry.repo.toLowerCase() === request.repo.toLowerCase());
@@ -64,7 +68,20 @@ async function prepareGrant(input: unknown): Promise<Omit<QueueAuthorization, 'a
   }
   const taskRevision = createHash('sha256').update(JSON.stringify(roadmap)).digest('hex');
   const workflowRevision = queueMockWorkflowRevision(request.agent, request.maxAttempts);
-  return queueAuthorizationSchema.omit({ audit: true }).parse({ ...request, repositoryRoot, taskRevision, workflowRevision });
+  let githubSnapshot: QueueAuthorization['githubSnapshot'];
+  if (roadmap.githubIssue !== undefined) {
+    const cached = state.input.githubIssues.find((issue) => issue.repo.toLowerCase() === request.repo.toLowerCase() && issue.number === roadmap.githubIssue);
+    if (!cached || cached.state !== 'open') throw new Error('Linked GitHub issue is missing or closed in the verified queue');
+    const evidence = await issueReader(repositoryRoot, request.repo, roadmap.githubIssue);
+    if (!freshGithubSnapshot(evidence.snapshot) || evidence.snapshot.issueNumber !== roadmap.githubIssue) throw new Error('Direct GitHub issue evidence is stale or mismatched');
+    if (evidence.state !== 'open' || !evidence.labels.includes('roadmap-approved')) throw new Error('Linked GitHub issue is closed or lost its planning approval');
+    if (cached.title !== evidence.title || [...cached.labels].sort().join('\0') !== [...evidence.labels].sort().join('\0')) {
+      throw new Error('Linked GitHub issue changed since queue refresh');
+    }
+    githubSnapshot = evidence.snapshot;
+  }
+  return queueAuthorizationSchema.omit({ audit: true }).parse({ ...request, repositoryRoot, taskRevision, workflowRevision,
+    ...(githubSnapshot ? { githubSnapshot } : {}) });
 }
 
 function consumeChallenge(state: QueueState, kind: 'enroll' | 'grant' | 'revoke', origin: string): NonNullable<QueueState['pendingOwnerChallenge']> {
@@ -107,9 +124,9 @@ export async function finishOwnerEnrollment(originInput: string, response: Regis
   });
 }
 
-export async function beginOwnerGrant(originInput: string, input: unknown) {
+export async function beginOwnerGrant(originInput: string, input: unknown, issueReader: GithubIssueReader = readGithubIssue) {
   const { origin, rpId } = webAuthnOrigin(originInput);
-  const grant = await prepareGrant(input);
+  const grant = await prepareGrant(input, issueReader);
   const state = await readQueueState();
   if (!state.ownerAuthenticator) throw new Error('Windows Hello owner credential is unavailable');
   const challenge = challengeFor(grant);
@@ -139,7 +156,7 @@ export async function beginOwnerRevocation(originInput: string, repo: string, ta
   return options;
 }
 
-export async function finishOwnerDecision(originInput: string, kind: 'grant' | 'revoke', response: AuthenticationResponseJSON): Promise<QueueAuthorization> {
+export async function finishOwnerDecision(originInput: string, kind: 'grant' | 'revoke', response: AuthenticationResponseJSON, issueReader: GithubIssueReader = readGithubIssue): Promise<QueueAuthorization> {
   const { origin } = webAuthnOrigin(originInput);
   let pending: NonNullable<QueueState['pendingOwnerChallenge']> | undefined;
   let credential: NonNullable<QueueState['ownerAuthenticator']> | undefined;
@@ -155,7 +172,7 @@ export async function finishOwnerDecision(originInput: string, kind: 'grant' | '
   await updateQueue(async (state) => {
     if (state.ownerAuthenticator?.id !== credential!.id || state.ownerAuthenticator.counter !== credential!.counter) throw new Error('Owner credential changed during approval');
     if (kind === 'grant') {
-      const current = await prepareGrant(pending!.grant);
+      const current = await prepareGrant(pending!.grant, issueReader);
       if (!timingSafeEqual(grantDigest(current), grantDigest(pending!.grant!))) throw new Error('Task scope changed after owner verification');
     }
     const index = state.authorizations.findIndex((entry) => entry.repo.toLowerCase() === pending!.grant!.repo.toLowerCase() && entry.taskId.toLowerCase() === pending!.grant!.taskId.toLowerCase());

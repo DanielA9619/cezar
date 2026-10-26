@@ -5,9 +5,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { queueMockWorkflowRevision } from './mock-workflow.ts';
-import { dispatchOneMockTask, queueDetailedPreview } from './bridge.ts';
+import { dispatchOneMockTask, queueDetailedPreview, queueExecutionReasons } from './bridge.ts';
 import { readQueueState, saveQueueInput, updateQueue } from './queue.ts';
 import { beginOwnerGrant, finishOwnerDecision } from './owner-auth.ts';
+import { beginOwnerRevocation } from './owner-auth.ts';
+import { parseGithubIssueEvidence } from './github-issue-verifier.ts';
 
 describe('disposable mock queue bridge', () => {
   let home: string;
@@ -58,7 +60,7 @@ describe('disposable mock queue bridge', () => {
     });
   }
 
-  it('requires a fresh signed WebAuthn assertion with user verification for the exact grant', async () => {
+  it('requires a fresh signed WebAuthn assertion, then runs the approved mock into review', async () => {
     const { publicKey, privateKey } = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
     const jwk = publicKey.export({ format: 'jwk' });
     const cose = Buffer.concat([Buffer.from('a5010203262001215820', 'hex'), Buffer.from(jwk.x!, 'base64url'),
@@ -86,11 +88,16 @@ describe('disposable mock queue bridge', () => {
     expect((await readQueueState()).authorizations).toHaveLength(0);
     await beginOwnerGrant(origin, request);
     await expect(finishOwnerDecision(origin, 'grant', response)).rejects.toThrow('challenge');
+    const expired = await beginOwnerGrant(origin, request);
+    await updateQueue((state) => { state.pendingOwnerChallenge!.expiresAt = new Date(Date.now() - 1).toISOString(); });
+    await expect(finishOwnerDecision(origin, 'grant', assertion(expired.options.challenge))).rejects.toThrow('expired');
     const fresh = await beginOwnerGrant(origin, request);
     const verified = await finishOwnerDecision(origin, 'grant', assertion(fresh.options.challenge));
     expect(verified).toMatchObject({ credentialId, taskId: task.id, agent: 'claude', scope: '.' });
     expect((await queueDetailedPreview()).rows.find((row) => row.id === task.id)?.executionEligible).toBe(true);
-  });
+    expect((await dispatchOneMockTask(task.id)).status).toBe('review');
+    await expect(dispatchOneMockTask(task.id)).rejects.toThrow('not eligible');
+  }, 120_000);
 
   it('rejects missing, expired, revoked, changed, and claimed approvals before launch', async () => {
     expect((await queueDetailedPreview()).rows.find((row) => row.id === task.id)?.executionEligible).toBe(false);
@@ -136,5 +143,67 @@ describe('disposable mock queue bridge', () => {
     const result = await dispatchOneMockTask(task.id);
     expect(result.status).toBe('failed');
     expect((await readQueueState()).executionClaims[0]?.state).toBe('failed');
+  }, 120_000);
+
+  it('binds a signed issue grant to direct GitHub evidence and revokes it with a fresh assertion', async () => {
+    const id = `${task.repo}#7`;
+    await updateQueue((state) => {
+      state.input.roadmaps[0]!.githubIssue = 7;
+      state.input.githubIssues = [{ repo: task.repo, number: 7, title: 'Issue seven',
+        url: 'https://github.com/fictional/atlas/issues/7', state: 'open', labels: ['roadmap-approved'] }];
+      state.sources[task.repo] = { complete: true, verifiedAt: new Date().toISOString() };
+    });
+    const rawRepo = { id: 42, node_id: 'R_42', full_name: task.repo, url: 'https://api.github.com/repos/fictional/atlas' };
+    const rawIssue = { id: 117, node_id: 'I_117', number: 7, repository_url: rawRepo.url, state: 'open',
+      updated_at: '2026-10-24T00:00:00Z', title: 'Issue seven', body: 'Do a mock',
+      labels: [{ id: 1, name: 'roadmap-approved' }] };
+    let currentIssue = rawIssue;
+    const issueReader = async () => parseGithubIssueEvidence(task.repo, 7, rawRepo, currentIssue);
+    const { publicKey, privateKey } = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+    const jwk = publicKey.export({ format: 'jwk' });
+    const cose = Buffer.concat([Buffer.from('a5010203262001215820', 'hex'), Buffer.from(jwk.x!, 'base64url'),
+      Buffer.from('225820', 'hex'), Buffer.from(jwk.y!, 'base64url')]);
+    const credentialId = Buffer.from('issue-credential-id').toString('base64url');
+    await updateQueue((state) => { state.ownerAuthenticator = {
+      id: credentialId, publicKey: cose.toString('base64url'), counter: 0, enrolledAt: new Date().toISOString(),
+    }; });
+    const origin = 'http://localhost:4888';
+    const assertion = (challenge: string, counter: number) => {
+      const clientDataJSON = Buffer.from(JSON.stringify({ type: 'webauthn.get', challenge, origin }));
+      const authenticatorData = Buffer.concat([createHash('sha256').update('localhost').digest(),
+        Buffer.from([0x05, 0, 0, 0, counter])]);
+      const signature = sign('sha256', Buffer.concat([authenticatorData, createHash('sha256').update(clientDataJSON).digest()]), privateKey);
+      return { id: credentialId, rawId: credentialId, type: 'public-key' as const, clientExtensionResults: {},
+        response: { clientDataJSON: clientDataJSON.toString('base64url'), authenticatorData: authenticatorData.toString('base64url'),
+          signature: signature.toString('base64url') } };
+    };
+    const request = { repo: task.repo, taskId: id, scope: '.', agent: 'claude' as const,
+      workflow: 'queue-mock-verify', expiresAt: new Date(Date.now() + 90_000).toISOString(),
+      maxAttempts: 2, requireReview: true as const, verificationCommand: 'cezar:mock-verify' };
+    const begin = await beginOwnerGrant(origin, request, issueReader);
+    const grant = await finishOwnerDecision(origin, 'grant', assertion(begin.options.challenge, 1), issueReader);
+    expect(grant.githubSnapshot).toMatchObject({ repositoryId: 42, issueId: 117, issueNumber: 7 });
+    expect((await queueExecutionReasons(await readQueueState(), task.repo, id, undefined, issueReader))).toEqual([]);
+    currentIssue = { ...rawIssue, body: 'Edited after approval' };
+    expect(await queueExecutionReasons(await readQueueState(), task.repo, id, undefined, issueReader)).toContain('GitHub issue identity or revision changed after approval');
+    await expect(dispatchOneMockTask(id, issueReader)).rejects.toThrow('revision changed');
+    currentIssue = { ...rawIssue, state: 'closed' };
+    expect(await queueExecutionReasons(await readQueueState(), task.repo, id, undefined, issueReader)).toContain('GitHub issue closed or lost planning approval');
+    currentIssue = { ...rawIssue, labels: [] };
+    expect(await queueExecutionReasons(await readQueueState(), task.repo, id, undefined, issueReader)).toContain('GitHub issue closed or lost planning approval');
+    expect(await queueExecutionReasons(await readQueueState(), task.repo, id, undefined,
+      async () => { throw new Error('Direct GitHub issue verification failed (rate limited)'); })).toContain('Direct GitHub issue verification failed (rate limited)');
+    currentIssue = rawIssue;
+    await updateQueue((state) => { state.input.roadmaps[0]!.title = 'Changed local task'; });
+    expect(await queueExecutionReasons(await readQueueState(), task.repo, id, undefined, issueReader)).toContain('Task revision changed after approval');
+    await updateQueue((state) => { state.input.roadmaps[0]!.title = task.title; });
+    const revokeOptions = await beginOwnerRevocation(origin, task.repo, id);
+    await finishOwnerDecision(origin, 'revoke', assertion(revokeOptions.challenge, 2), issueReader);
+    await expect(dispatchOneMockTask(id, issueReader)).rejects.toThrow('revoked');
+    const renewed = await beginOwnerGrant(origin, request, issueReader);
+    await finishOwnerDecision(origin, 'grant', assertion(renewed.options.challenge, 3), issueReader);
+    const run = await dispatchOneMockTask(id, issueReader);
+    expect(run.status).toBe('review');
+    await expect(dispatchOneMockTask(id, issueReader)).rejects.toThrow('not eligible');
   }, 120_000);
 });
