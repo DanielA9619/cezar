@@ -33,6 +33,7 @@ export function claudeInstallCandidates(
     return [
       join(home, '.local', 'bin', 'claude.exe'), // native installer
       join(nodeBinDir, 'claude.exe'), // npm global, next to node.exe
+      join(home, 'AppData', 'Roaming', 'npm', 'node_modules', '@anthropic-ai', 'claude-code', 'bin', 'claude.exe'),
     ];
   }
   return [

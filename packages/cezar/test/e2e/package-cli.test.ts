@@ -33,7 +33,7 @@ test('the release tarball installs and runs the dry-run CLI workflow', { timeout
     assert.ok(record, 'npm pack should describe the generated tarball');
 
     const packagedPaths = new Set(record.files.map((file) => file.path));
-    for (const requiredPath of ['dist/index.js', 'dist/core/supervised-agent-process.js', 'src/worktree-lifecycle/windows-process-supervisor.ps1', 'web/dist/index.html', 'scripts/mock-claude.mjs', 'README.md']) {
+    for (const requiredPath of ['dist/index.js', 'dist/core/supervised-agent-process.js', 'dist/roadmap/real-workflow.js', 'src/worktree-lifecycle/windows-process-supervisor.ps1', 'web/dist/index.html', 'scripts/mock-claude.mjs', 'scripts/queue-sum-verify.mjs', 'README.md']) {
       assert.ok(packagedPaths.has(requiredPath), `release tarball should contain ${requiredPath}`);
     }
     assert.equal(packagedPaths.has('src/index.ts'), false, 'release tarball should not contain TypeScript sources');
@@ -155,6 +155,7 @@ if (args.join(' ') === 'auth status --json') {
         env: {
           ...process.env,
           CEZ_CLAUDE_BIN: claudeShim,
+          CEZ_DRY_RUN: '0', // Exercise this mock shim even when the parent test command uses dry-run.
           CEZ_HOME: cezHome,
         },
         timeout: 60_000,

@@ -148,7 +148,7 @@ export type RunPrRef = z.infer<typeof prRefSchema>;
 export const runRecordSchema = z.object({
   agentCleanup: z.enum(['pending', 'confirmed', 'uncertain']).optional(),
   /** Milestone 1C queue provenance. A missing runtime guard stops recovery; never infer one from task text. */
-  queueExecution: z.object({ repo: z.string(), taskId: z.string(), claimId: z.string().uuid(), generation: z.number().int().positive(), mockOnly: z.literal(true) }).optional(),
+  queueExecution: z.object({ repo: z.string(), taskId: z.string(), claimId: z.string().uuid(), generation: z.number().int().positive(), mockOnly: z.boolean(), providerStarts: z.number().int().nonnegative().optional() }).optional(),
   id: z.string(),
   title: z.string(),
   /** Display title (#389): the auto-derived summary of the first agent turn,

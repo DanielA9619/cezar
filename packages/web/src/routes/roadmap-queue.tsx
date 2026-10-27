@@ -34,9 +34,11 @@ export function RoadmapQueueRoute() {
   const prepare = async (row: QueueResponse['rows'][number]) => {
     setBusy(true)
     try {
-      const grant = { taskId: row.id, repo: row.repo, scope: scope.trim(), agent: row.proposedAgent,
+      const real = row.proposedWorkflow === 'queue-claude-pro-verify'
+      const grant = { taskId: row.id, repo: row.repo, scope: real ? 'sum.mjs' : scope.trim(), agent: row.proposedAgent,
         workflow: row.proposedWorkflow, expiresAt: new Date(Date.now() + 60 * 60_000).toISOString(),
-        maxAttempts: 2, requireReview: true, verificationCommand: verificationCommand.trim() }
+        maxAttempts: 2, requireReview: true, verificationCommand: real ? 'cezar:sum-verify' : verificationCommand.trim(),
+        executionMode: real ? 'claude-pro' : 'mock' }
       const answer = await ownerPost<NonNullable<typeof pendingGrant>>('grant/start', { grant })
       setPendingGrant(answer)
       setError(null)
@@ -50,7 +52,7 @@ export function RoadmapQueueRoute() {
       const response = await startAuthentication({ optionsJSON: pendingGrant.options })
       await ownerPost('grant/finish', { response })
       setPendingGrant(null)
-      setNotice('Exact task grant verified by Windows Hello and stored. Queue execution remains mock-only.')
+      setNotice('Exact task grant verified by Windows Hello and stored. Execution requires a separate explicit CLI dispatch.')
       await load()
     } catch (failure) { setError(failure instanceof Error ? failure.message : String(failure)) }
     finally { setBusy(false) }
@@ -91,7 +93,7 @@ export function RoadmapQueueRoute() {
   return <main className="mx-auto max-w-6xl space-y-5 p-6" data-route="roadmap-queue">
     <header className="flex items-start justify-between gap-3">
       <div><h1 className="text-2xl font-semibold">Roadmap work queue</h1>
-        <p className="text-sm text-muted-foreground">Authorized execution is limited to bundled mocks in marked disposable projects. Refreshing this page never starts an agent.</p></div>
+        <p className="text-sm text-muted-foreground">Execution defaults to mocks. Real Claude Pro requires explicit operator enablement and its own signed grant in a disposable project. Refreshing this page never starts an agent.</p></div>
       <button type="button" className="rounded border px-3 py-1 text-sm" onClick={() => void load()}>Reload</button>
     </header>
     {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
@@ -106,7 +108,9 @@ export function RoadmapQueueRoute() {
       </div>}
       {pendingGrant && <div className="rounded border p-3 text-sm space-y-2">
         <p className="font-medium">Confirm this exact approval</p>
+        {pendingGrant.grant.executionMode === 'claude-pro' && <p className="font-semibold">REAL Claude Pro subscription execution using Sonnet. Only sum.mjs may change. Two attempts maximum, eight turns and 180 seconds per attempt, 15 seconds per verification, 420 seconds total. No automatic merge or restart.</p>}
         <p>{pendingGrant.grant.repo} · {pendingGrant.grant.taskId} · revision {pendingGrant.grant.taskRevision} · {pendingGrant.grant.agent}/{pendingGrant.grant.workflow}</p>
+        <p>Workflow revision: {pendingGrant.grant.workflowRevision}</p>
         <p>Repository: {pendingGrant.grant.repositoryRoot}. Scope: {pendingGrant.grant.scope}. Verify: {pendingGrant.grant.verificationCommand}. Expires: {new Date(pendingGrant.grant.expiresAt).toLocaleString()}. Maximum attempts: {pendingGrant.grant.maxAttempts}. Human review required.</p>
         {pendingGrant.grant.githubSnapshot && <p>GitHub issue #{pendingGrant.grant.githubSnapshot.issueNumber}: repository ID {pendingGrant.grant.githubSnapshot.repositoryId}, issue ID {pendingGrant.grant.githubSnapshot.issueId}, updated {pendingGrant.grant.githubSnapshot.updatedAt}, snapshot SHA-256 {pendingGrant.grant.githubSnapshot.digest}. This issue is checked again before execution.</p>}
         <button type="button" disabled={busy} onClick={() => void finishGrant()} className="rounded border px-3 py-1">Verify with Windows Hello</button>
@@ -115,7 +119,7 @@ export function RoadmapQueueRoute() {
     </section>
     <section className="rounded-lg border p-4">
       <h2 className="font-semibold">Next selection preview</h2>
-      <p className="text-sm">{queue?.nextTaskId ?? 'No eligible task'}{queue?.nextTaskId ? ' is next for explicit mock dispatch.' : ''}</p>
+      <p className="text-sm">{queue?.nextTaskId ?? 'No eligible task'}{queue?.nextTaskId ? ' is next for explicit dispatch.' : ''}</p>
       <p className="text-xs text-muted-foreground">Queue updated {queue?.updatedAt ? new Date(queue.updatedAt).toLocaleString() : 'never'}. GitHub refresh is an explicit CLI action.</p>
     </section>
     <div className="overflow-x-auto rounded-lg border">
@@ -126,7 +130,7 @@ export function RoadmapQueueRoute() {
         <td className="p-3"><select aria-label={`Priority for ${row.id}`} disabled={busy} value={row.priority} onChange={(event) => void priority(row.id, Number(event.target.value))} className="rounded border bg-background p-1">{[1, 2, 3, 4, 5].map((value) => <option key={value} value={value}>P{value}</option>)}</select></td>
         <td className="p-3">{[...row.dependencies, ...row.blockers].join(', ') || 'None'}</td><td className="p-3">{row.proposedAgent}</td>
         <td className="p-3">{row.authorization}</td><td className="p-3">{row.lastRefresh ? new Date(row.lastRefresh).toLocaleString() : 'Unverified'}</td>
-        <td className="p-3">{row.executionEligible ? 'Eligible for mock dispatch' : row.executionReasons.join('; ')}<br /><span className="text-xs text-muted-foreground">Attempts {row.attemptsUsed}/{row.maxAttempts ?? '—'} · {row.reviewRequired ? 'Human review required' : 'Review not authorized'}{row.leaseOwner ? ` · owner ${row.leaseOwner}` : ''}{row.executionStatus ? ` · ${row.executionStatus}` : ''}{row.verificationProgress ? ` · ${row.verificationProgress}` : ''}</span></td>
+        <td className="p-3">{row.executionEligible ? `Eligible for ${row.proposedWorkflow === 'queue-claude-pro-verify' ? 'REAL Claude Pro' : 'mock'} dispatch` : row.executionReasons.join('; ')}<br /><span className="text-xs text-muted-foreground">Attempts {row.attemptsUsed}/{row.maxAttempts ?? '—'} · {row.reviewRequired ? 'Human review required' : 'Review not authorized'}{row.leaseOwner ? ` · owner ${row.leaseOwner}` : ''}{row.executionStatus ? ` · ${row.executionStatus}` : ''}{row.verificationProgress ? ` · ${row.verificationProgress}` : ''}</span></td>
         <td className="p-3"><span className="font-medium">{row.status}</span><br /><span className="text-xs text-muted-foreground">{row.reason}</span>{queue?.ownerEnrolled && row.status === 'ready' && <><br /><button type="button" disabled={busy || !scope.trim() || !verificationCommand.trim()} onClick={() => void prepare(row)} className="mt-2 rounded border px-2 py-1">Prepare exact approval</button></>}</td>
       </tr>)}</tbody></table>
       {queue?.rows.length === 0 && <p className="p-4 text-sm text-muted-foreground">No allowlisted work is loaded. Use the roadmap queue CLI to load planning input.</p>}

@@ -8,7 +8,9 @@ import { queueAuthorizationRequestSchema, queueAuthorizationSchema, type QueueAu
 import { loadWorkspaceConfig } from '../workspace/config.ts';
 import { queuePreview, readQueueState, updateQueue, type QueueState } from './queue.ts';
 import { queueMockWorkflowRevision } from './mock-workflow.ts';
+import { REAL_QUEUE_WORKFLOW, REAL_QUEUE_SCOPE, REAL_QUEUE_VERIFY, queueRealWorkflowRevision } from './real-workflow.ts';
 import { cezarHomeDir } from '../paths.ts';
+import { assertRealFixture } from './real-fixture.ts';
 import { freshGithubSnapshot, readGithubIssue, type GithubIssueReader } from './github-issue-verifier.ts';
 
 const CHALLENGE_MS = 2 * 60_000;
@@ -25,7 +27,7 @@ function webAuthnOrigin(origin: string): { origin: string; rpId: string } {
 function grantDigest(grant: Omit<QueueAuthorization, 'audit'>): Buffer {
   // Explicit field order is the approval protocol; no caller-supplied extra keys are signed.
   const value = [grant.repo, grant.repositoryRoot, grant.taskId, grant.taskRevision, grant.scope,
-    grant.workflowRevision,
+    grant.workflowRevision, grant.executionMode,
     grant.agent, grant.workflow, grant.expiresAt, grant.maxAttempts, grant.requireReview, grant.verificationCommand,
     grant.githubSnapshot && { repositoryId: grant.githubSnapshot.repositoryId, repositoryNodeId: grant.githubSnapshot.repositoryNodeId,
       issueId: grant.githubSnapshot.issueId, issueNodeId: grant.githubSnapshot.issueNodeId,
@@ -55,11 +57,15 @@ async function prepareGrant(input: unknown, issueReader: GithubIssueReader): Pro
   const roadmap = state.input.roadmaps.find((entry) => (entry.githubIssue ? `${entry.repo}#${entry.githubIssue}` : entry.id).toLowerCase() === request.taskId.toLowerCase());
   if (!roadmap) throw new Error('A roadmap task with immutable local identity is required for this mock milestone');
   if (request.agent !== row.proposedAgent || request.workflow !== row.proposedWorkflow) throw new Error('Agent or workflow differs from the selected queue task');
-  if (request.scope !== '.') throw new Error('Milestone 1C permits only the whole disposable repository scope (.)');
-  if (request.verificationCommand !== 'cezar:mock-verify') throw new Error('Milestone 1C permits only the bundled mock verifier');
-  if (request.maxAttempts > 3) throw new Error('Milestone 1C permits at most three mock attempts');
+  const real = request.workflow === REAL_QUEUE_WORKFLOW;
+  if (real && (request.executionMode !== 'claude-pro' || request.agent !== 'claude' || roadmap.githubIssue !== undefined)) throw new Error('Real approval requires a local-only Claude Pro task');
+  if (!real && request.executionMode && request.executionMode !== 'mock') throw new Error('Mock workflow cannot authorize a real runner');
+  if (request.scope !== (real ? REAL_QUEUE_SCOPE : '.')) throw new Error('Scope differs from the fixed queue policy');
+  if (request.verificationCommand !== (real ? REAL_QUEUE_VERIFY : 'cezar:mock-verify')) throw new Error('Only the fixed bundled verifier is permitted');
+  if (request.maxAttempts > (real ? 2 : 3)) throw new Error('Attempt limit exceeds the fixed queue policy');
   if (Date.parse(request.expiresAt) <= Date.now()) throw new Error('Approval has already expired');
   const repositoryRoot = await realpath(project.root);
+  if (real) await assertRealFixture(repositoryRoot);
   if (!process.env.CEZ_HOME) throw new Error('An isolated CEZ_HOME is required for mock approval');
   const sandbox = await realpath(join(cezarHomeDir(), 'roadmap', 'disposable')).catch(() => undefined);
   const rel = sandbox ? relative(sandbox, repositoryRoot) : '..';
@@ -67,7 +73,7 @@ async function prepareGrant(input: unknown, issueReader: GithubIssueReader): Pro
     throw new Error('Owner approval is limited to a marked disposable repository under CEZ_HOME/roadmap/disposable');
   }
   const taskRevision = createHash('sha256').update(JSON.stringify(roadmap)).digest('hex');
-  const workflowRevision = queueMockWorkflowRevision(request.agent, request.maxAttempts);
+  const workflowRevision = real ? queueRealWorkflowRevision(request.maxAttempts) : queueMockWorkflowRevision(request.agent, request.maxAttempts);
   let githubSnapshot: QueueAuthorization['githubSnapshot'];
   if (roadmap.githubIssue !== undefined) {
     const cached = state.input.githubIssues.find((issue) => issue.repo.toLowerCase() === request.repo.toLowerCase() && issue.number === roadmap.githubIssue);

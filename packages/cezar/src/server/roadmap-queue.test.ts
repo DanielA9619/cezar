@@ -29,7 +29,9 @@ describe('workspace roadmap queue API', () => {
     const app = createApp({ repoRoot: root, store, manager: {} as RunManager, version: 'test' });
     const before = await apiRequest(app, '/api/v1/workspace/roadmap-queue');
     expect(before.status).toBe(200);
-    expect(queueResponseSchema.parse(await before.json()).nextTaskId).toBe('schema');
+    const preview = queueResponseSchema.parse(await before.json());
+    expect(preview.nextTaskId).toBeNull();
+    expect(preview.rows[0]).toMatchObject({ id: 'schema', status: 'ready', executionEligible: false });
     const changed = await apiRequest(app, '/api/v1/workspace/roadmap-queue/priority', {
       method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ taskId: 'schema', priority: 1 }),
     });

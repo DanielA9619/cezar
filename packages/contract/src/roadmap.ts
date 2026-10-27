@@ -11,6 +11,7 @@ export const queueAuthorizationSchema = z.object({
   expiresAt: z.string().datetime(), revokedAt: z.string().datetime().optional(),
   maxAttempts: z.number().int().min(1), requireReview: z.literal(true),
   verificationCommand: z.string().min(1),
+  executionMode: z.enum(['mock', 'claude-pro']).optional(),
   /** Absent on pre-1C planning records. Such records can never authorize execution. */
   repositoryRoot: z.string().min(1).optional(), taskRevision: z.string().min(1).optional(), workflowRevision: z.string().min(1).optional(),
   credentialId: z.string().min(1).optional(), approvedAt: z.string().datetime().optional(),
@@ -52,7 +53,7 @@ export const queueRowSchema = z.object({
   reviewRequired: z.boolean(),
 });
 export const queueResponseSchema = z.object({
-  mode: z.enum(['planning-only', 'mock-only']), updatedAt: z.string().datetime().optional(),
+  mode: z.enum(['planning-only', 'mock-only', 'guarded-real']), updatedAt: z.string().datetime().optional(),
   rows: z.array(queueRowSchema), nextTaskId: z.string().nullable(),
   authorizations: z.array(queueAuthorizationSchema),
   ownerEnrolled: z.boolean(),

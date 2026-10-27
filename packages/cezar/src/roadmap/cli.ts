@@ -9,7 +9,7 @@ import { readRunIndexFromDisk } from '../runs/run-index.ts';
 import { githubIssuesFromForge, planRoadmap, roadmapInputSchema } from './planner.ts';
 import { queuePreview, readQueueState, saveQueueInput } from './queue.ts';
 import { refreshQueueGithub } from './github-source.ts';
-import { dispatchOneMockTask } from './bridge.ts';
+import { dispatchOneQueueTask } from './bridge.ts';
 
 /** Explicit CLI only. No timer, server route, RunManager call, or agent spawn. */
 export async function runRoadmapCommand(args: string[]): Promise<number> {
@@ -25,8 +25,8 @@ export async function runRoadmapCommand(args: string[]): Promise<number> {
       } else if (command === 'refresh' && args.length === 2) {
         await refreshQueueGithub();
       } else if (command === 'dispatch' && args.length <= 3) {
-        const result = await dispatchOneMockTask(args[2]);
-        console.log(`Mock queue task ${result.taskId}: run ${result.runId} → ${result.status}`);
+        const result = await dispatchOneQueueTask(args[2]);
+        console.log(`Queue task ${result.taskId}: run ${result.runId} → ${result.status}`);
         return result.status === 'review' ? 0 : 1;
       } else if (command === 'authorize' || command === 'revoke') {
         throw new Error('Owner authorization requires Windows Hello in the local Roadmap queue cockpit; CLI input cannot approve or revoke execution');

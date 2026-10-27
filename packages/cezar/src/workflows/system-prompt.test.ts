@@ -8,6 +8,7 @@ import { AUTOMATIONS_PROMPT } from '../automations/prompts.ts';
 import { HANDOFF_INSTRUCTIONS, HANDOFF_ONLY_INSTRUCTIONS } from '../handoff.ts';
 import { RunStore } from '../runs/store.ts';
 import { WorkspaceSemaphore } from '../workspace/semaphore.ts';
+import { removeTempDir } from '../test-fixtures/remove-temp-dir.testkit.ts';
 import { CLAUDE_HEADLESS_GUIDANCE } from '../core/claude-cli-runner.ts';
 import type { WorkflowDef } from './types.ts';
 import {
@@ -175,13 +176,16 @@ describe('systemPrompt end-to-end (dry run)', () => {
     });
   });
 
-  afterAll(() => {
+  afterAll(async () => {
+    for (const record of store.listRuns()) await manager.cancelAndWait(record.id);
+    await manager.lifecycle.shutdown();
+    manager.dispose();
     for (const [key, value] of Object.entries(savedEnv)) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
     }
     store.flush();
-    rmSync(repoRoot, { recursive: true, force: true });
+    await removeTempDir(repoRoot);
   });
 
   // Agent step + trailing check so the agent step is non-interactive — the

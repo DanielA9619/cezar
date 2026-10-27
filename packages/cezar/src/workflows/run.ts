@@ -27,6 +27,8 @@ import { onUsage, registerRunProcess, unregisterRunProcess, type ProcessUsage } 
 import { parseUsageLimit } from '../core/usage-limit.ts';
 import { createMockQueueRunner, createRunner } from '../core/runner-factory.ts';
 import { queueMockWorkflow } from '../roadmap/mock-workflow.ts';
+import { queueRealWorkflow } from '../roadmap/real-workflow.ts';
+import { createRealQueueRunner } from '../core/runner-factory.ts';
 import type { RunnerId } from '../core/agent-runner.ts';
 import { modelConflictsWithRunner } from '../core/model-presets.ts';
 import { AGENT_MODELS_LOCKED_ERROR, agentModelsLocked } from '../core/agent-model-policy.ts';
@@ -1278,7 +1280,8 @@ export class RunManager {
   }
 
   private runnerFor(runId: string, backend: RunnerId) {
-    return this.store.getRun(runId)?.queueExecution ? createMockQueueRunner(backend) : createRunner(backend);
+    const queue = this.store.getRun(runId)?.queueExecution;
+    return queue ? queue.mockOnly ? createMockQueueRunner(backend) : createRealQueueRunner(backend) : createRunner(backend);
   }
 
   constructor(
@@ -1524,7 +1527,9 @@ export class RunManager {
     options: { generateFollowups?: boolean; recordedProfileId?: string } = {},
   ): Promise<{ env: Record<string, string>; profileId: string }> {
     const run = this.store.getRun(runId);
-    if (run?.queueExecution) return { env: { CEZ_QUEUE_MOCK: '1' }, profileId: 'queue-mock' };
+    if (run?.queueExecution) return run.queueExecution.mockOnly
+      ? { env: { CEZ_QUEUE_MOCK: '1' }, profileId: 'queue-mock' }
+      : { env: {}, profileId: 'queue-claude-pro' };
     const profileId = options.recordedProfileId
       ?? (backend === (run?.runner ?? 'claude') ? run?.agentProfile : undefined);
     const resolved = await resolveProfileEnvForRoot(this.repoRoot, backend, profileId);
@@ -2019,6 +2024,10 @@ export class RunManager {
     for (const run of this.store.listRuns()) if (this.cleanupBlocked(run.id)) retainedTmp.add(run.id);
     sweepAgentTmpDirs(this.dataDir, [...retainedTmp]);
     for (const run of live) {
+      if (run.queueExecution) {
+        this.store.updateRun(run.id, { status: 'failed', error: 'Queue execution interrupted; retained claim requires manual recovery and never relaunches', finishedAt: new Date().toISOString() });
+        continue;
+      }
       if (this.lifecycle.isBlocked(run.id)) {
         this.store.updateRun(run.id, {status: 'waiting', error: 'Worktree scripts need an explicit recovery action'});
         continue;
@@ -2848,7 +2857,7 @@ export class RunManager {
   private scheduleAutoResumeIfLimited(runId: string): void {
     if (this.autoResumeTimers.has(runId)) return; // already promised
     const run = this.store.getRun(runId);
-    if (!run || run.status !== 'failed') return;
+    if (!run || run.queueExecution || run.status !== 'failed') return;
     // Archiving IS resigning from a task. Reviving one because a window happened to reopen would
     // be the feature working against the clearest signal the user can give it.
     if (run.archived) return;
@@ -4570,7 +4579,7 @@ export class RunManager {
     const queueError = await this.queuePermit(runId);
     if (queueError) { failBeforeSpawn(queueError); return; }
     const runner = this.runnerFor(runId, continueBackend);
-    const continueMcp = await this.privateMcpForLaunch(continueBackend, onEvent);
+    const continueMcp = this.store.getRun(runId)?.queueExecution ? [] : await this.privateMcpForLaunch(continueBackend, onEvent);
     if (state.cancelled) return;
     state.currentStepId = stepId;
     this.beginUsageInvocation(runId, state, stepId);
@@ -6658,7 +6667,7 @@ export class RunManager {
     const queueError = await this.queuePermit(runId);
     if (queueError) return queueError;
     const runner = this.runnerFor(runId, stepBackend);
-    const stepMcp = await this.privateMcpForLaunch(stepBackend, onEvent);
+    const stepMcp = this.store.getRun(runId)?.queueExecution ? [] : await this.privateMcpForLaunch(stepBackend, onEvent);
     let session: AgentSession;
     state.currentStepId = step.id;
     this.beginUsageInvocation(runId, state, step.id);
@@ -6955,7 +6964,7 @@ export class RunManager {
   ): Promise<string | undefined> {
     // CEZ_AUTONAME=0 kills all LLM naming; dry-run skips it too unless
     // CEZ_AUTONAME=1 forces the mock path — see autoNamingActive.
-    if (!autoNamingActive()) return undefined;
+    if (this.store.getRun(runId)?.queueExecution || !autoNamingActive()) return undefined;
     task = this.store.redactRunText(runId, task);
     if (live?.turnText) live = { ...live, turnText: this.store.redactRunText(runId, live.turnText) };
     try {
@@ -7137,6 +7146,12 @@ export class RunManager {
    * off — settle straight to `done`, leaving the diff in the worktree untouched.
    */
   private async settleSuccess(runId: string): Promise<void> {
+    const queueError = await this.queuePermit(runId);
+    const queueRun = this.store.getRun(runId);
+    if (queueRun?.queueExecution && (queueError || queueRun.steps.find(step => step.id === 'verify')?.status !== 'done')) {
+      this.store.updateRun(runId, { status: 'failed', error: queueError ?? 'Queue verification did not pass', finishedAt: new Date().toISOString(), currentStepId: undefined });
+      return;
+    }
     if (this.cleanupBlocked(runId)) {
       this.store.updateRun(runId, { status: 'failed', error: 'Process-tree cleanup is unconfirmed; acceptance is blocked', finishedAt: new Date().toISOString(), currentStepId: undefined });
       return;
@@ -8059,8 +8074,16 @@ export class RunManager {
     return cleanup === 'pending' || cleanup === 'uncertain';
   }
 
-  private checkpointAgentProcess(runId: string): void {
+  private checkpointAgentProcess(runId: string, agent = true): void {
     if (this.cleanupBlocked(runId)) throw new Error('Previous process-tree cleanup is unconfirmed; refusing to launch another process');
+    const run = this.store.getRun(runId);
+    if (agent && run?.queueExecution?.mockOnly === false) {
+      const retry = run.workflowDef?.steps.find(step => step.id === 'verify')?.onFail?.max;
+      const cap = typeof retry === 'number' ? retry + 1 : 1;
+      const starts = run.queueExecution.providerStarts ?? 0;
+      if (starts >= cap || cap > 2) throw new Error('Approved real provider start limit exhausted');
+      this.store.updateRun(runId, { queueExecution: { ...run.queueExecution, providerStarts: starts + 1 } });
+    }
     this.store.updateRun(runId, { agentCleanup: 'pending' });
     this.store.flush({ throwOnError: true });
   }
@@ -8091,7 +8114,7 @@ export class RunManager {
     if (queueRun?.queueExecution) {
       const attempts = queueRun.workflowDef?.steps.find((candidate) => candidate.id === 'verify')?.onFail?.max;
       const approvedAttempts = typeof attempts === 'number' ? attempts + 1 : 1;
-      const fixed = queueMockWorkflow(queueRun.runner === 'codex' ? 'codex' : 'claude', approvedAttempts).steps[1]?.command;
+      const fixed = (queueRun.queueExecution.mockOnly ? queueMockWorkflow(queueRun.runner === 'codex' ? 'codex' : 'claude', approvedAttempts) : queueRealWorkflow(approvedAttempts)).steps[1]?.command;
       if (step.id !== 'verify' || command !== fixed) return { ok: false, output: 'Queue verification command is not the bundled mock verifier', exitCode: -1 };
     }
     emit({ type: 'note', stepId: step.id, message: `$ ${command}` });
@@ -8122,9 +8145,9 @@ export class RunManager {
       state.autosaveCheckpointBlocked = !checkpointSafe;
       if (checkpointSafe) this.autosaveCheckpointBlockedRuns.delete(runId);
       else this.autosaveCheckpointBlockedRuns.add(runId);
-      const result = await executeLifecycleCommand({ command, cwd: state.cwd, env, loginShell: true, timeoutSeconds: step.timeoutSeconds,
+      const result = await executeLifecycleCommand({ command, cwd: state.cwd, env, loginShell: !queueRun?.queueExecution, timeoutSeconds: step.timeoutSeconds,
         executeInDryRun: true, signal: controller.signal,
-        onStart: async () => { this.checkpointAgentProcess(runId); },
+        onStart: async () => { this.checkpointAgentProcess(runId, false); },
         onOutput: frame => {
           if (output.length + frame.text.length > CHECK_OUTPUT_CAP) outputTruncated = true;
           if (output.length < CHECK_OUTPUT_CAP) output += frame.text.slice(0, CHECK_OUTPUT_CAP - output.length);

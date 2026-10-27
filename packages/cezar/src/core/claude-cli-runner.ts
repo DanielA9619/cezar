@@ -21,6 +21,7 @@ import { isSignalTerminationExit, trackChildExit } from './agent-runner.ts';
 import { buildChildEnv } from './agent-env.ts';
 import { disclaimedCommand } from './disclaim-spawn.ts';
 import { resolveClaudeBin } from './claude-bin.ts';
+import { realQueueEnv } from './real-queue-policy.ts';
 import { costWeightedTokens, type RawUsage } from './usage.ts';
 import { readNdjson } from './ndjson.ts';
 import { claudeMcpAllowRules, toClaudeMcpConfig, type PrivateMcpServer } from './private-mcp.ts';
@@ -60,6 +61,7 @@ export function appendClaudeSystemPrompt(systemPrompt?: string): string {
 }
 
 export interface ClaudeCliRunnerOptions {
+  guardedQueue?: boolean;
   /** Override the binary name/path; defaults to `claude` on PATH. */
   bin?: string;
   /** Wall-clock timeout for a run (ms); per-spec `timeoutMs` still wins. */
@@ -100,9 +102,11 @@ export class ClaudeCliRunner implements AgentRunner {
 
   private readonly bin: string;
   private readonly timeoutMs: number;
+  private readonly guardedQueue: boolean;
   private lastSession: AgentSession | null = null;
 
   constructor(opts: ClaudeCliRunnerOptions = {}) {
+    this.guardedQueue = opts.guardedQueue === true;
     this.bin = resolveClaudeExecutable(opts.bin);
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS;
   }
@@ -121,12 +125,20 @@ export class ClaudeCliRunner implements AgentRunner {
     onEvent?: (event: AgentEvent) => void,
     opts: SessionOptions = {},
   ): AgentSession {
+    if (this.guardedQueue) {
+      if (process.env.CEZ_QUEUE_REAL !== '1' || process.env.CEZ_DRY_RUN === '1') throw new Error('Real queue execution is not enabled');
+      spec = { ...spec, allowedTools: ['Read(./sum.mjs)', 'Edit(./sum.mjs)', 'Write(./sum.mjs)'],
+        additionalDirectories: [], mcpServers: [], env: {}, model: 'sonnet', timeoutMs: 180_000 };
+    }
     const mcpConfig = writeClaudeMcpConfig(spec.mcpServers);
-    const args = buildClaudeArgs(spec, process.env, mcpConfig?.path);
+    const args = buildClaudeArgs(spec, this.guardedQueue ? {} : process.env, mcpConfig?.path);
+    if (this.guardedQueue) args.push('--restricted', '--safe-mode', '--tools', 'Read,Edit,Write', '--setting-sources', '',
+      '--settings', JSON.stringify({ disableAllHooks: true, apiKeyHelper: '', permissions: { defaultMode: 'dontAsk' } }),
+      '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--max-turns', '8');
 
     let child: ChildProcessWithoutNullStreams;
     try {
-      const env = buildChildEnv({ backend: this.backend, extraEnv: spec.env });
+      const env = this.guardedQueue ? realQueueEnv() : buildChildEnv({ backend: this.backend, extraEnv: spec.env });
       const [file, argv] = disclaimedCommand(this.bin, args, env);
       child = spawnAgentProcess(file, argv, { cwd: spec.cwd, env }, opts.beforeProcessStart);
     } catch (err) {

@@ -10,6 +10,7 @@ import { runRecordSchema, RunStore, type RunRecord } from '../runs/store.ts';
 import { WorkspaceSemaphore, type WorkspaceResourceLimits } from '../workspace/semaphore.ts';
 import { RunManager } from './run.ts';
 import type { WorkflowDef } from './types.ts';
+import { removeTempDir } from '../test-fixtures/remove-temp-dir.testkit.ts';
 
 const run = promisify(execFile);
 const GIT_ID = ['-c', 'user.name=test', '-c', 'user.email=test@local'];
@@ -64,13 +65,14 @@ describe('the dispatch engine (spec 2026-09-10-dispatch)', () => {
       if (Date.now() >= deadline) throw new Error('timed out waiting for dispatch runs to stop');
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
+    await manager.lifecycle.shutdown();
     manager.dispose();
     for (const [key, value] of Object.entries(savedEnv)) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
     }
     store.flush();
-    rmSync(repoRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await removeTempDir(repoRoot);
   });
 
   /** A manager with its own semaphore, so a test can decide how much of the tree may run. */

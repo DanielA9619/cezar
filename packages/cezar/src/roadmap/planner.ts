@@ -17,6 +17,7 @@ export const roadmapInputSchema = z.object({
     approval: z.enum(['approved', 'pending', 'rejected']),
     dependencies: z.array(taskId).default([]), blockers: z.array(z.string()).default([]),
     preferredRunner: runner.default('claude'), githubIssue: z.number().int().positive().optional(),
+    workflow: z.enum(['queue-mock-verify', 'queue-claude-pro-verify']).optional(),
   })).max(500).default([]),
   runningTaskIds: z.array(taskId).default([]),
   completedTaskIds: z.array(taskId).default([]),
@@ -61,7 +62,7 @@ export function planRoadmap(input: RoadmapInput, now = new Date()): PlanningPrev
   const candidates: Array<{
     id: string; repo: string; title: string; source: 'github' | 'roadmap'; priority: number;
     approval: 'approved' | 'pending' | 'rejected'; dependencies: string[]; blockers: string[];
-    preferredRunner: 'claude' | 'codex'; closed: boolean;
+    preferredRunner: 'claude' | 'codex'; closed: boolean; workflow?: string;
   }> = [
     ...input.roadmaps.map((task) => ({
       ...task, source: 'roadmap' as const,
@@ -97,7 +98,7 @@ export function planRoadmap(input: RoadmapInput, now = new Date()): PlanningPrev
       priority: task.priority, approval: task.approval, status, score,
       reason: reasons.length ? reasons.join('; ') : `approved ${task.source} candidate; priority P${task.priority}; dependencies satisfied`,
       preferredRunner: task.preferredRunner, executionEligible: false as const,
-      proposedWorkflow: 'queue-mock-verify',
+      proposedWorkflow: task.workflow ?? 'queue-mock-verify',
     };
   });
   rows.sort((a, b) => {

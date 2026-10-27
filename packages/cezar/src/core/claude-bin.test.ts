@@ -127,10 +127,10 @@ describe.skipIf(process.platform === 'win32')('resolveClaudeBin', () => {
 describe('claudeInstallCandidates', () => {
   it('covers the native installer, the legacy local install, npm global, and Homebrew on posix', () => {
     expect(claudeInstallCandidates('/home/u', 'linux', '/nvm/v22/bin')).toEqual([
-      '/home/u/.local/bin/claude',
-      '/home/u/.claude/local/claude',
-      '/nvm/v22/bin/claude',
-      '/home/u/.npm-global/bin/claude',
+      join('/home/u', '.local/bin/claude'),
+      join('/home/u', '.claude/local/claude'),
+      join('/nvm/v22/bin', 'claude'),
+      join('/home/u', '.npm-global/bin/claude'),
       '/opt/homebrew/bin/claude',
       '/usr/local/bin/claude',
       '/usr/bin/claude',
@@ -177,6 +177,8 @@ describe('claudeShellCandidates', () => {
       join(home, '.local', 'bin', 'claude.cmd'),
       join(nodeBinDir, 'claude.exe'),
       join(nodeBinDir, 'claude.cmd'),
+      join(home, 'AppData', 'Roaming', 'npm', 'node_modules', '@anthropic-ai', 'claude-code', 'bin', 'claude.exe'),
+      join(home, 'AppData', 'Roaming', 'npm', 'node_modules', '@anthropic-ai', 'claude-code', 'bin', 'claude.cmd'),
     ]);
   });
 });

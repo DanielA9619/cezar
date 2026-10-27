@@ -274,11 +274,12 @@ describe('RunManager directional usage accounting', () => {
   });
 });
 
-it('parallel variants ignore a worktree opt-out and retain isolated mode', () => {
+it('parallel variants ignore a worktree opt-out and retain isolated mode', async () => {
   const repoRoot = mkdtempSync(join(tmpdir(), 'cez-variant-isolation-'));
   const store = RunStore.open(join(repoRoot, '.ai/cezar'));
+  let manager: RunManager | undefined;
   try {
-    const manager = new RunManager(store, repoRoot, {
+    manager = new RunManager(store, repoRoot, {
       semaphore: new WorkspaceSemaphore({ initial: { maxParallel: 0 } }),
     });
     const records = manager.startVariants(
@@ -294,8 +295,13 @@ it('parallel variants ignore a worktree opt-out and retain isolated mode', () =>
 
     expect(records.map((record) => record.worktree)).toEqual([undefined, undefined]);
   } finally {
+    if (manager) {
+      for (const run of store.listRuns()) await manager.cancelAndWait(run.id);
+      await manager.lifecycle.shutdown();
+      manager.dispose();
+    }
     store.flush();
-    rmSync(repoRoot, { recursive: true, force: true });
+    await removeTempDir(repoRoot);
   }
 });
 
@@ -845,7 +851,7 @@ describe('a chain of 2 selected skills runs BOTH steps, in order (#410)', () => 
       else process.env[key] = value;
     }
     store.flush();
-    rmSync(repoRoot, { recursive: true, force: true });
+    return removeTempDir(repoRoot);
   });
 
   it('runs both skill steps to completion, and the second step\'s prompt carries the chain guard', async () => {
@@ -935,7 +941,7 @@ describe('a single agent step plus a check step gets NO chain note (#410)', () =
       else process.env[key] = value;
     }
     store.flush();
-    rmSync(repoRoot, { recursive: true, force: true });
+    return removeTempDir(repoRoot);
   });
 
   it("leaves the lone agent step's prompt untouched", async () => {

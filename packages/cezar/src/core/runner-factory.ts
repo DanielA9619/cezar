@@ -8,6 +8,7 @@ import { CursorAgentRunner } from './cursor-agent-runner.ts';
 import { PiRunner } from './pi-runner.ts';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { realQueueClaudeBin } from './real-queue-policy.ts';
 
 /**
  * The single place that maps a backend id onto a concrete runner. Everything
@@ -42,4 +43,11 @@ export function createMockQueueRunner(backend: RunnerId): AgentRunner {
   if (!script) throw new Error('Queue bridge permits only the bundled Claude and Codex mocks');
   const bin = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'scripts', script);
   return backend === 'codex' ? new CodexAppServerRunner({ bin }) : new ClaudeCliRunner({ bin });
+}
+
+export function createRealQueueRunner(backend: RunnerId): AgentRunner {
+  if (backend !== 'claude' || process.platform !== 'win32' || process.env.CEZ_QUEUE_REAL !== '1' || process.env.CEZ_DRY_RUN === '1') {
+    throw new Error('Real queue requires explicit Windows Claude enablement');
+  }
+  return new ClaudeCliRunner({ bin: realQueueClaudeBin(), guardedQueue: true });
 }
