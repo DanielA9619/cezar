@@ -1,6 +1,7 @@
 import * as React from 'react'
 import { startAuthentication, startRegistration } from '@simplewebauthn/browser'
 import { resolveApiUrl, type QueueResponse } from '@open-mercato/cezar-api-client'
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 
 const endpoint = '/api/v1/workspace/roadmap-queue'
 
@@ -8,6 +9,8 @@ export function RoadmapQueueRoute() {
   const [queue, setQueue] = React.useState<QueueResponse | null>(null)
   const [error, setError] = React.useState<string | null>(null)
   const [busy, setBusy] = React.useState(false)
+  const [preparing, setPreparing] = React.useState<string | null>(null)
+  const [prepareError, setPrepareError] = React.useState<{ key: string; message: string } | null>(null)
   const [scope, setScope] = React.useState('.')
   const [verificationCommand, setVerificationCommand] = React.useState('cezar:mock-verify')
   const [pendingGrant, setPendingGrant] = React.useState<{ options: Parameters<typeof startAuthentication>[0]['optionsJSON']; grant: QueueResponse['authorizations'][number] } | null>(null)
@@ -16,8 +19,9 @@ export function RoadmapQueueRoute() {
     const response = await fetch(resolveApiUrl(`${endpoint}/owner/${path}`), {
       method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body ?? {}),
     })
-    const result = await response.json() as T & { error?: string }
-    if (!response.ok) throw new Error(result.error ?? `Windows Hello request failed (${response.status})`)
+    const result = await response.json().catch(() => null) as (T & { error?: string }) | null
+    if (!response.ok) throw new Error(`Windows Hello request failed (HTTP ${response.status}): ${result?.error ?? response.statusText ?? 'No error details returned'}`)
+    if (!result) throw new Error('Windows Hello response was not valid JSON. Reload and prepare again.')
     return result
   }
   const enroll = async () => {
@@ -32,7 +36,12 @@ export function RoadmapQueueRoute() {
     finally { setBusy(false) }
   }
   const prepare = async (row: QueueResponse['rows'][number]) => {
+    const key = `${row.repo}:${row.id}`
     setBusy(true)
+    setPreparing(key)
+    setPrepareError(null)
+    setPendingGrant(null)
+    setError(null)
     try {
       const real = row.proposedWorkflow === 'queue-claude-pro-verify'
       const grant = { taskId: row.id, repo: row.repo, scope: real ? 'sum.mjs' : scope.trim(), agent: row.proposedAgent,
@@ -42,12 +51,17 @@ export function RoadmapQueueRoute() {
       const answer = await ownerPost<NonNullable<typeof pendingGrant>>('grant/start', { grant })
       setPendingGrant(answer)
       setError(null)
-    } catch (failure) { setError(failure instanceof Error ? failure.message : String(failure)) }
-    finally { setBusy(false) }
+    } catch (failure) {
+      const message = failure instanceof Error ? failure.message : String(failure)
+      setPrepareError({ key, message })
+      setError(message)
+    }
+    finally { setBusy(false); setPreparing(null) }
   }
   const finishGrant = async () => {
     if (!pendingGrant) return
     setBusy(true)
+    setError(null)
     try {
       const response = await startAuthentication({ optionsJSON: pendingGrant.options })
       await ownerPost('grant/finish', { response })
@@ -106,16 +120,20 @@ export function RoadmapQueueRoute() {
         <label>Work scope <input value={scope} onChange={(event) => setScope(event.target.value)} className="ml-1 rounded border bg-background p-1" /></label>
         <label>Verification command <input value={verificationCommand} onChange={(event) => setVerificationCommand(event.target.value)} className="ml-1 rounded border bg-background p-1" /></label>
       </div>}
-      {pendingGrant && <div className="rounded border p-3 text-sm space-y-2">
-        <p className="font-medium">Confirm this exact approval</p>
+      <Dialog open={pendingGrant !== null} onOpenChange={(open) => { if (!open && !busy) setPendingGrant(null) }}>
+      {pendingGrant && <DialogContent className="max-h-[85vh] overflow-y-auto break-words text-sm sm:max-w-2xl">
+        <DialogTitle>Confirm this exact approval</DialogTitle>
+        <DialogDescription>Review {pendingGrant.grant.taskId} before signing. Preparing these details does not authorize or dispatch work.</DialogDescription>
         {pendingGrant.grant.executionMode === 'claude-pro' && <p className="font-semibold">REAL Claude Pro subscription execution using Sonnet. Only sum.mjs may change. Two attempts maximum, eight turns and 180 seconds per attempt, 15 seconds per verification, 420 seconds total. No automatic merge or restart.</p>}
         <p>{pendingGrant.grant.repo} · {pendingGrant.grant.taskId} · revision {pendingGrant.grant.taskRevision} · {pendingGrant.grant.agent}/{pendingGrant.grant.workflow}</p>
         <p>Workflow revision: {pendingGrant.grant.workflowRevision}</p>
         <p>Repository: {pendingGrant.grant.repositoryRoot}. Scope: {pendingGrant.grant.scope}. Verify: {pendingGrant.grant.verificationCommand}. Expires: {new Date(pendingGrant.grant.expiresAt).toLocaleString()}. Maximum attempts: {pendingGrant.grant.maxAttempts}. Human review required.</p>
         {pendingGrant.grant.githubSnapshot && <p>GitHub issue #{pendingGrant.grant.githubSnapshot.issueNumber}: repository ID {pendingGrant.grant.githubSnapshot.repositoryId}, issue ID {pendingGrant.grant.githubSnapshot.issueId}, updated {pendingGrant.grant.githubSnapshot.updatedAt}, snapshot SHA-256 {pendingGrant.grant.githubSnapshot.digest}. This issue is checked again before execution.</p>}
+        {error && <p role="alert" className="text-destructive">{error}</p>}
         <button type="button" disabled={busy} onClick={() => void finishGrant()} className="rounded border px-3 py-1">Verify with Windows Hello</button>
-        <button type="button" onClick={() => setPendingGrant(null)} className="ml-2 rounded border px-3 py-1">Cancel</button>
-      </div>}
+        <button type="button" disabled={busy} onClick={() => setPendingGrant(null)} className="rounded border px-3 py-1">Cancel</button>
+      </DialogContent>}
+      </Dialog>
     </section>
     <section className="rounded-lg border p-4">
       <h2 className="font-semibold">Next selection preview</h2>
@@ -131,7 +149,7 @@ export function RoadmapQueueRoute() {
         <td className="p-3">{[...row.dependencies, ...row.blockers].join(', ') || 'None'}</td><td className="p-3">{row.proposedAgent}</td>
         <td className="p-3">{row.authorization}</td><td className="p-3">{row.lastRefresh ? new Date(row.lastRefresh).toLocaleString() : 'Unverified'}</td>
         <td className="p-3">{row.executionEligible ? `Eligible for ${row.proposedWorkflow === 'queue-claude-pro-verify' ? 'REAL Claude Pro' : 'mock'} dispatch` : row.executionReasons.join('; ')}<br /><span className="text-xs text-muted-foreground">Attempts {row.attemptsUsed}/{row.maxAttempts ?? '—'} · {row.reviewRequired ? 'Human review required' : 'Review not authorized'}{row.leaseOwner ? ` · owner ${row.leaseOwner}` : ''}{row.executionStatus ? ` · ${row.executionStatus}` : ''}{row.verificationProgress ? ` · ${row.verificationProgress}` : ''}</span></td>
-        <td className="p-3"><span className="font-medium">{row.status}</span><br /><span className="text-xs text-muted-foreground">{row.reason}</span>{queue?.ownerEnrolled && row.status === 'ready' && <><br /><button type="button" disabled={busy || !scope.trim() || !verificationCommand.trim()} onClick={() => void prepare(row)} className="mt-2 rounded border px-2 py-1">Prepare exact approval</button></>}</td>
+        <td className="p-3"><span className="font-medium">{row.status}</span><br /><span className="text-xs text-muted-foreground">{row.reason}</span>{queue?.ownerEnrolled && row.status === 'ready' && <><br /><button type="button" disabled={busy || !scope.trim() || !verificationCommand.trim()} onClick={() => void prepare(row)} className="mt-2 rounded border px-2 py-1">{preparing === `${row.repo}:${row.id}` ? 'Preparing…' : 'Prepare exact approval'}</button>{prepareError?.key === `${row.repo}:${row.id}` && <p role="alert" className="mt-2 text-destructive">{prepareError.message}</p>}</>}</td>
       </tr>)}</tbody></table>
       {queue?.rows.length === 0 && <p className="p-4 text-sm text-muted-foreground">No allowlisted work is loaded. Use the roadmap queue CLI to load planning input.</p>}
     </div>

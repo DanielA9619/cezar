@@ -249,3 +249,35 @@ This readiness applies only to the prepared local fixture and the exact policy
 above. The broad legacy suite is not green. No real provider has been launched;
 the next step is Daniel's new Windows Hello approval, followed by a separately
 authorized, supervised explicit dispatch.
+
+## Approval UI follow-up (2026-10-28)
+
+After preserving and removing the unrelated untracked mock `notes.md` trace, the
+fixture guard passes. The live `POST /api/v1/workspace/roadmap-queue/owner/grant/start`
+returns HTTP 200 with the correct finite-sum grant proposal and authentication
+options. The browser's Prepare handler also receives the proposal. There is no
+current fixture, request-validation or authorization rejection, and the cockpit's
+stderr log contains no error for the request. Historical requests were not logged,
+so their exact responses cannot be reconstructed.
+
+The UI previously placed both successful preparation details and errors above the
+wide queue table, without focus or feedback next to the clicked button. Preparation
+now shows a progress label and opens a focused, scrollable review dialog. Failures
+show the HTTP status and server reason beside that task's Prepare button; malformed
+error responses retain their HTTP status. Signing errors also remain visible inside
+the dialog. Preparation never invokes Windows Hello automatically.
+
+Component regressions cover successful preparation without signing, HTTP 409 fixture
+rejection, HTTP 503 non-JSON failure and successful retry. All three fail against the
+previous UI and pass after the fix. The existing server, its dry-run flags, task and
+workflow revisions, grants and enrolled credential are unchanged. Only unsigned,
+short-lived preparation challenges are created while verifying Prepare.
+
+The rebuilt page on port 4878 was checked in the browser: clicking Prepare opens
+the exact finite-sum proposal and the Windows Hello verification button. No signing
+was performed; the live queue still reports mock-only mode, zero real grants and
+zero finite-sum attempts. Typecheck, four focused tests, 40 Node unit tests (two
+existing skips), the production build and all 25 package tests pass. The broad
+Vitest run stops at the existing five-second worktree-lifecycle test timeout
+(`sweeps the last PR head ref only after reclaim teardown removes its worktree`);
+its timeout and coverage were not changed.
